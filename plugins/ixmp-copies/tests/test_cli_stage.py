@@ -52,7 +52,7 @@ def test_init_template_parses_and_refuses_overwrite(tmp_path):
     out = run_cli(["init", "--model", "M", "--venv", "~/repos/.efc"], proj)
     assert out.returncode == 0, out.stderr
     cfg = config.parse(proj / config.FILENAME)
-    assert cfg.platform == "my_project-local" and cfg.model == "M" and cfg.venv == "~/repos/.efc"
+    assert cfg.platform == "my-project-local" and cfg.model == "M" and cfg.venv == "~/repos/.efc"
     assert cfg.areas["live"] == "ixmp_copies/my_project/live"
     again = run_cli(["init"], proj)
     assert again.returncode == 3 and "exists" in again.stderr
@@ -225,3 +225,42 @@ def test_job_scripts_run_against_a_snapshot(project, tmp_path):
                          text=True, env=failing, cwd=tmp_path)
     assert bad.returncode != 0 and "Exit: run 7 close 0 seed 0" in bad.stdout, bad.stdout[-1500:]
 
+
+
+def test_init_sanitises_the_folder_name(tmp_path):
+    proj = tmp_path / "4th-Gen.Paper"
+    proj.mkdir()
+    out = run_cli(["init"], proj)
+    assert out.returncode == 0, out.stderr
+    cfg = config.parse(proj / config.FILENAME)
+    assert cfg.platform == "4th-gen-paper-local" and cfg.areas["test"] == "ixmp_copies/4th_gen_paper/test"
+    assert "platform-add" in out.stdout
+
+
+@needs_ixmp
+def test_platform_add(project, tmp_path):
+    cfg, hd = project
+    home = tmp_path / "ixmp_home"
+    home.mkdir()
+    (home / "config.json").write_text(json.dumps({"platform": {"default": "local", "local": {
+        "class": "jdbc", "driver": "hsqldb", "path": str(tmp_path / "x" / "local")}}}))
+    env = {"IXMP_DATA": str(home)}
+    dest = tmp_path / "dbs" / "proj"
+    dry = run_cli(["platform-add", "--dir", str(dest)], cfg.project_root, **env)
+    assert dry.returncode == 0 and "new database" in dry.stdout, dry.stderr
+    assert "proj-local" not in json.loads((home / "config.json").read_text())["platform"]
+    done = run_cli(["platform-add", "--dir", str(dest), "--apply"], cfg.project_root, **env)
+    assert done.returncode == 0, done.stderr
+    entry = json.loads((home / "config.json").read_text())["platform"]["proj-local"]
+    assert entry["url"] == f"jdbc:hsqldb:file:{dest / 'db'};hsqldb.default_table_type=cached", entry
+    again = run_cli(["platform-add", "--dir", str(dest), "--apply"], cfg.project_root, **env)
+    assert again.returncode == 3 and "already" in again.stderr
+    on_hd = run_cli(["platform-add", "--name", "p2", "--dir", str(hd / "dbs"), "--apply"], cfg.project_root, **env)
+    assert on_hd.returncode == 3 and "H drive" in on_hd.stderr
+    mem = fake_db(tmp_path / "memdb")
+    Path(f"{mem}.script").write_text("CREATE MEMORY TABLE A\n")
+    memory = run_cli(["platform-add", "--name", "p3", "--dir", str(mem.parent), "--apply"], cfg.project_root, **env)
+    assert memory.returncode == 3 and "MEMORY" in memory.stderr
+    existing = run_cli(["platform-add", "--name", "p4", "--dir", str(fake_db(tmp_path / "okdb").parent)],
+                       cfg.project_root, **env)
+    assert existing.returncode == 0 and "existing database" in existing.stdout, existing.stderr

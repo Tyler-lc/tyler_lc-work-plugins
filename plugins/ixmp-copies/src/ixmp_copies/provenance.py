@@ -15,6 +15,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -51,11 +52,45 @@ def _git(model_dir: Path, *args: str) -> str | None:
         return None
 
 
+def head_from_files(model_dir: Path) -> str | None:
+    """The checkout's HEAD commit read from its .git files, for hosts without git (cluster
+    compute nodes): a .git folder or a worktree's `gitdir:` file, a symbolic or detached HEAD,
+    loose or packed refs. None outside a checkout or for a layout not covered here."""
+    for folder in (model_dir, *model_dir.parents):
+        dot = folder / ".git"
+        if dot.is_dir():
+            gitdir = dot
+        elif dot.is_file() and dot.read_text().startswith("gitdir:"):
+            gitdir = (folder / dot.read_text()[len("gitdir:"):].strip()).resolve()
+        else:
+            continue
+        head = (gitdir / "HEAD").read_text().strip()
+        if not head.startswith("ref:"):
+            return head
+        ref = head[len("ref:"):].strip()
+        common = gitdir / "commondir"
+        common = (gitdir / common.read_text().strip()).resolve() if common.is_file() else gitdir
+        for base in (gitdir, common):
+            if (base / ref).is_file():
+                return (base / ref).read_text().strip()
+        packed = common / "packed-refs"
+        if packed.is_file():
+            for line in packed.read_text().splitlines():
+                if line.endswith(f" {ref}"):
+                    return line.split()[0]
+        return None
+    return None
+
+
 def model_source(model_dir: Path, message_ix_version: str | None = None) -> dict:
     """Where `model_dir`'s GAMS source comes from: its path, the git commit of the checkout it
-    lies in (None outside git), the tracked files changed there, the content fingerprint, and
-    the version label of the message_ix the caller imported."""
+    lies in (None outside git), the tracked files changed there (None when git is not installed
+    here, which only git can tell), the content fingerprint, and the version label of the
+    message_ix the caller imported."""
     model_dir = Path(model_dir).resolve()
+    if shutil.which("git") is None:
+        return {"path": str(model_dir), "git_commit": head_from_files(model_dir), "git_changed": None,
+                "fingerprint": fingerprint(model_dir), "message_ix_version": message_ix_version}
     commit = _git(model_dir, "rev-parse", "HEAD")
     prefix = _git(model_dir, "rev-parse", "--show-prefix") or ""
     status = _git(model_dir, "status", "--porcelain", "--untracked-files=no", "--", ".") or ""

@@ -3,7 +3,11 @@
 The chain is one-way: live database -> backup -> seed -> job copies -> merge into a main.
 
 Setup and checks:
-    init [--platform P] [--model M] [--venv V]   write ixmp_copies.toml here (never overwrites)
+    init [--platform P] [--model M] [--venv V] [--name N]
+                                        write ixmp_copies.toml here (never overwrites)
+    platform-add [--name P] [--dir D] [--apply]
+                                        register a local HyperSQL platform with CACHED tables
+                                        (a new or an existing database, never on the H drive)
     doctor [--local]                    check every prerequisite, local and on the cluster
     where --area A [KIND]               print <area> or <area>/KIND (jobs, seeds, mains, runs,
                                         code, backups) as this machine sees it
@@ -49,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -82,11 +87,51 @@ def cmd_init(args) -> int:
     path = Path.cwd() / config_mod.FILENAME
     if path.exists():
         raise Refused(f"{path} exists")
-    name = copies.require_name(Path.cwd().name.lower().replace("-", "_"))
-    text = config_mod.template(name, args.platform or f"{name}-local", args.model or "",
-                               args.venv or "~/repos/.venv")
-    path.write_text(text)
-    print(f"wrote {path}; edit it, then run `ixmp-copies doctor`")
+    name = args.name or re.sub(r"[^a-z0-9_]+", "_", Path.cwd().name.lower()).strip("_")
+    copies.require_name(name)
+    platform = args.platform or f"{name.replace('_', '-')}-local"
+    path.write_text(config_mod.template(name, platform, args.model or "", args.venv or "~/repos/.venv"))
+    print(f"wrote {path} (project {name}, platform {platform}). Next:\n"
+          f"  1. edit it: [cluster] venv and modules, [storage] roots if your H drive is mounted elsewhere\n"
+          f"  2. ixmp-copies platform-add --apply      (if {platform} is not registered with ixmp yet)\n"
+          f"  3. ixmp-copies doctor                    (until nothing fails)\n"
+          f"  4. git add {path.name} && git commit")
+    return 0
+
+
+def cmd_platform_add(args) -> int:
+    """Register a local HyperSQL platform with CACHED tables in this process's ixmp config."""
+    from ixmp_copies.platforms import ixmp_config
+
+    cfg = config_mod.load()
+    name = args.name or cfg.platform
+    dest = Path(args.dir).expanduser().resolve() if args.dir else Path.home() / "ixmp_local" / name
+    ixc = ixmp_config()
+    if name in ixc.get("platform"):
+        raise Refused(f"platform {name!r} is already in {ixc.path}: {ixc.get('platform')[name]}")
+    for base in copies.hdrive_candidates(cfg):
+        if copies.reachable(base) and base.resolve() in (dest / STEM).parents:
+            raise Refused(f"{dest} is on the H drive: a working database belongs on a local disk")
+    db = dest / STEM
+    if Path(f"{db}.script").exists():
+        try:
+            copies.require_cached_tables(db)
+        except ValueError as err:
+            raise Refused(f"{db} exists and cannot be used: {err}") from err
+        state = "an existing database"
+    elif dest.exists() and any(dest.iterdir()):
+        raise Refused(f"{dest} exists and holds files but no {STEM}.script")
+    else:
+        state = "a new database, created on first open"
+    url = copies.hsqldb_url(db)
+    print(f"{name} -> {url} ({state}) in {ixc.path}")
+    if not args.apply:
+        print("dry run: ixmp config unchanged; pass --apply")
+        return 0
+    dest.mkdir(parents=True, exist_ok=True)
+    ixc.add_platform(name, "jdbc", "hsqldb", url=url)
+    ixc.save()
+    print(f"registered {name}")
     return 0
 
 
@@ -150,7 +195,7 @@ def cmd_restore(args) -> int:
     manifest = copies.restore(folder, dest, cfg)
     record = _record(cfg, f"restore_{dest.name}_{time.strftime('%Y%m%d_%H%M%S')}", {**manifest, "copy": str(dest)})
     print(f"restored {folder} to {dest}; record {record}\nregister it under a new platform name:\n"
-          f"  ixmp platform add <name> jdbc hsqldb \"url={copies.hsqldb_url(dest / STEM)}\"")
+          f"  ixmp-copies platform-add --name <name> --dir {dest} --apply")
     return 0
 
 
@@ -354,8 +399,8 @@ def parser() -> argparse.ArgumentParser:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    def add(name, func, *flags, **opts):
-        s = sub.add_parser(name)
+    def add(command, func, *flags, **opts):
+        s = sub.add_parser(command)
         for flag in flags:
             s.add_argument(flag, required=True)
         for flag, kw in opts.items():
@@ -364,7 +409,9 @@ def parser() -> argparse.ArgumentParser:
         return s
 
     apply = {"action": "store_true"}
-    add("init", cmd_init, platform={}, model={}, venv={})
+    add("init", cmd_init, platform={}, model={}, venv={}, name={"help": "project name ([a-z0-9_])"})
+    add("platform-add", cmd_platform_add, name={"help": "default: [project] platform"},
+        dir={"help": "default: ~/ixmp_local/<name>"}, apply=apply)
     add("doctor", cmd_doctor, local={"action": "store_true", "help": "skip the cluster checks"})
     w = add("where", cmd_where, "--area")
     w.add_argument("kind", nargs="?", choices=("jobs", "seeds", "mains", "runs", "code", "backups"))

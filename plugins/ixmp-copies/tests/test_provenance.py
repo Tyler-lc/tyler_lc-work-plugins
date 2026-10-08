@@ -102,3 +102,29 @@ def test_job_copy_records_and_checks_the_model_source(project, tmp_path, monkeyp
     with pytest.raises(dbc.CopyMismatch, match="did the source change"):
         dbc.job_copy(seed, jobs / "j2", "p", SHARED, model, "test", cfg)
     assert not (jobs / "j2" / "model_source.json").exists()
+
+
+def test_commit_without_git(tmp_path, monkeypatch):
+    """Cluster compute nodes have no git: the commit comes from the .git files, loose or packed,
+    in a checkout or a worktree, and uncommitted changes are unknown (None), not none."""
+    repo = tmp_path / "pkg"
+    model = model_src(repo)
+    git(repo, "init", "-q")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "x")
+    head = git(repo, "rev-parse", "HEAD")
+    git(repo, "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "other")
+    wt_model = tmp_path / "wt" / "model_src"
+    (wt_model / "MESSAGE_run.gms").write_text("* edited")
+    git(tmp_path / "wt", "commit", "-qam", "wt")
+    wt_head = git(tmp_path / "wt", "rev-parse", "HEAD")
+    monkeypatch.setattr(pv.shutil, "which", lambda name: None)
+    loose = pv.model_source(model)
+    assert loose["git_commit"] == head and loose["git_changed"] is None
+    assert pv.model_source(wt_model)["git_commit"] == wt_head
+    git(repo, "pack-refs", "--all")
+    assert not (repo / ".git" / "refs" / "heads" / "other").exists()
+    assert pv.head_from_files(model) == head and pv.head_from_files(wt_model) == wt_head
+    git(repo, "checkout", "-q", "--detach")
+    assert pv.head_from_files(model) == head
+    assert pv.head_from_files(tmp_path / "elsewhere") is None

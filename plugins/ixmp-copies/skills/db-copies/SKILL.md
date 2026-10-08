@@ -23,8 +23,10 @@ backup software), and never script around a refusal.** A refusal means the state
 understood: report it to the user.
 
 Tool: `ixmp-copies` (`python -m ixmp_copies`), in this plugin's `src/`. Settings: the project's
-`ixmp_copies.toml`. First-time setup, for a new user or a new project: `SETUP.md` beside this
-plugin's README; then `ixmp-copies doctor` says what is missing.
+`ixmp_copies.toml`. First-time setup, for a new user or a new project: the README's "For an
+agent installing this" (the order, and what to ask the user) and `SETUP.md` beside it; then
+`ixmp-copies doctor` says what is missing, and `trial/new_project_trial.sh` runs one real job
+and merge end to end.
 
 ## The chain (one way)
 

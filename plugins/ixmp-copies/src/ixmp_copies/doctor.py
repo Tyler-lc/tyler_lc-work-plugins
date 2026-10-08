@@ -44,8 +44,7 @@ def _local(cfg: Config) -> list[Check]:
         info = ixmp.config.get_platform_info(cfg.platform)[1]
     except ValueError as err:
         out.append(Check(f"platform {cfg.platform!r} registered", "FAIL", str(err),
-                         "ixmp platform add <name> jdbc hsqldb \"url=jdbc:hsqldb:file:<dir>/db;"
-                         "hsqldb.default_table_type=cached\" (SETUP.md, step 4)"))
+                         "ixmp-copies platform-add --apply (SETUP.md, step 6)"))
         info = None
     if info is not None:
         try:
