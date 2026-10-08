@@ -4,5 +4,6 @@
   "description": "Run MESSAGE-ix solves on a SLURM cluster against checked copies of a local HyperSQL ixmp database, and merge the results back",
   "author": {
     "name": "Tyler-lc"
-  }
+  },
+  "license": "MIT"
 }
