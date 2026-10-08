@@ -1,0 +1,31 @@
+[project]
+name = "ixmp-copies"
+version = "0.1.0"
+description = "Run MESSAGE-ix/ixmp work on a SLURM cluster against checked copies of a local HyperSQL database"
+readme = "README.md"
+requires-python = ">=3.11"
+# ixmp and message_ix are imported only by the commands that open a platform; they come
+# from the project's own venv, so they are not pinned here.
+dependencies = []
+
+[project.optional-dependencies]
+ixmp = ["ixmp", "message_ix"]
+
+[project.scripts]
+ixmp-copies = "ixmp_copies.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=7"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ixmp_copies"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 140

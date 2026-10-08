@@ -1,0 +1,17 @@
+{
+  "name": "tyler_lc-work-plugins",
+  "owner": {
+    "name": "Tyler-lc"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for MESSAGE-ix / IIASA modelling work"
+  },
+  "plugins": [
+    {
+      "name": "ixmp-copies",
+      "source": "./plugins/ixmp-copies",
+      "description": "Run MESSAGE-ix solves on a SLURM cluster against checked copies of a local HyperSQL ixmp database, and merge the results back",
+      "version": "0.1.0"
+    }
+  ]
+}
