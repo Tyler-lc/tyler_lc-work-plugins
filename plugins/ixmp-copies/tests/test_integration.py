@@ -94,6 +94,7 @@ def test_full_chain(project, tmp_path):
     assert merged.returncode == 0, merged.stdout[-2000:] + merged.stderr[-2000:]
     record = json.loads(next(cfg.records_dir.glob(f"merge_results_{SCEN}_v*.json")).read_text())
     assert record["source_version"] == job_version and record["set_default"] and record["compare"]["ok"]
+    assert record["model_source"]["fingerprint"] == json.loads((job / "model_source.json").read_text())["fingerprint"]
     assert Path(record["pre_merge_backup"]).parent == (hd / "ixmp_live" / "backups" / "results").resolve()
     after = py(f"""
 import ixmp, message_ix

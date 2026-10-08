@@ -53,7 +53,9 @@ pip install ixmp message_ix                  # or editable installs of your chec
 ```
 
 Projects that need different branches of `message-ix-models` or `message_data` need separate
-venvs: a job pointed at another project's venv silently runs that project's branches.
+venvs: a job pointed at another project's venv silently runs that project's branches. The same
+holds for `message_ix` itself: venvs that import one editable checkout run whatever it holds, so
+moving it for one project moves all of them. `doctor` shows the commit each venv's solves use.
 Nothing of ixmp-copies is installed on the cluster: `stage` ships the tool with the code.
 
 ## 4. A local HyperSQL platform with CACHED tables

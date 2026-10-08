@@ -5,12 +5,14 @@ the SSH connection and are skipped when it is not open.
 
 from __future__ import annotations
 
+import json
 import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from ixmp_copies import provenance
 from ixmp_copies.config import Config, ConfigError, load
 from ixmp_copies.copies import hdrive_candidates, reachable, require_cached_tables
 from ixmp_copies.platforms import hsqldb_file
@@ -70,6 +72,8 @@ def _local(cfg: Config) -> list[Check]:
     model_dir = ixmp.config.get("message model dir")
     out.append(Check("message model dir", "ok" if model_dir and Path(model_dir).is_dir() else "FAIL",
                      str(model_dir), "install message_ix in this venv (it sets the model dir)"))
+    if model_dir and Path(model_dir).is_dir():
+        out += _model_checks("here", source_report(str(model_dir), message_ix))
     out.append(Check("java on PATH (merges and transfers run a JVM)",
                      "ok" if shutil.which("java") else "warn", shutil.which("java") or "not found",
                      "install a JRE locally if you run transfers here"))
@@ -81,6 +85,33 @@ def _local(cfg: Config) -> list[Check]:
                          f"move {cfg.path.name} to {top} (stage archives the repository from there)"))
     except (FileNotFoundError, subprocess.CalledProcessError) as err:
         out.append(Check("project is a git repository", "FAIL", str(err), "stage ships a commit: git init"))
+    return out
+
+
+# Run inside a venv (here, or on the cluster with provenance.py's source prepended): which
+# GAMS source solves use, and which message_ix the venv imports.
+REPORT = """
+import json, pathlib, ixmp, message_ix
+cfg = ixmp.config.get("message model dir")
+pkg = str(pathlib.Path(message_ix.__file__).parent / "model")
+print("IXC_REPORT " + json.dumps({"config_dir": cfg, "package_dir": pkg,
+      "source": model_source(pathlib.Path(cfg), message_ix.__version__)}))
+"""
+
+
+def source_report(model_dir: str, message_ix) -> dict:
+    return {"config_dir": model_dir, "package_dir": str(Path(message_ix.__file__).parent / "model"),
+            "source": provenance.model_source(Path(model_dir), message_ix.__version__)}
+
+
+def _model_checks(where: str, report: dict) -> list[Check]:
+    src = report["source"]
+    commit = (src["git_commit"] or "not in git")[:10]
+    out = [Check(f"GAMS source {where}", "ok",
+                 f"{src['path']} at {commit}, message_ix {src['message_ix_version']}, "
+                 f"fingerprint {src['fingerprint'][:12]}")]
+    for status, msg in provenance.assess(report["config_dir"], report["package_dir"], src):
+        out.append(Check(f"GAMS source {where} consistent", status, msg))
     return out
 
 
@@ -115,6 +146,16 @@ def _remote(cfg: Config) -> list[Check]:
                      "build the venv on the cluster with the module Python (SETUP.md, step 3) or fix "
                      "[cluster] venv / modules / lmod_init"))
     if py.returncode == 0:
+        script = Path(provenance.__file__).read_text() + REPORT
+        rep = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", cfg.ssh_host,
+                              f"bash -lc {shlex.quote(env + ' && python -')}"],
+                             input=script, capture_output=True, text=True, timeout=300)
+        lines = [ln for ln in rep.stdout.splitlines() if ln.startswith("IXC_REPORT ")]
+        if rep.returncode or not lines:
+            out.append(Check("GAMS source on the cluster", "FAIL", (rep.stderr or rep.stdout).strip()[-300:],
+                             "the cluster venv must import ixmp and message_ix"))
+        else:
+            out += _model_checks("on the cluster", json.loads(lines[-1].removeprefix("IXC_REPORT ")))
         java = ssh(f"{env} && java -version", timeout=60)
         out.append(Check("java on the cluster", "ok" if java.returncode == 0 else "FAIL",
                          java.stderr.strip().splitlines()[0] if java.stderr.strip() else "",

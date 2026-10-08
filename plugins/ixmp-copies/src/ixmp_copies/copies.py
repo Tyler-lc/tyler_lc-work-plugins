@@ -32,6 +32,7 @@ from pathlib import Path
 
 from ixmp_copies import __version__
 from ixmp_copies.config import Config, expand
+from ixmp_copies.provenance import fingerprint, model_source
 
 CHUNK = 1 << 22
 # What a cleanly closed HyperSQL 2.5 database may consist of. Anything else beside the stem
@@ -376,13 +377,15 @@ def hsqldb_url(db: Path) -> str:
 
 def job_copy(seed_folder: Path, job_dir: Path, platform: str, ixmp_config: dict,
              model_src: Path, area: str, cfg: Config, root: Path | None = None,
-             kind: str = "job") -> dict:
+             kind: str = "job", message_ix_version: str | None = None) -> dict:
     """Set up one job's own copy of a seed in the new folder `job_dir`, below the area's jobs/
     (kind "job"), or a results main below its mains/ (kind "main", which merges go into):
     db/ (the database), model/ (the GAMS model source, without run output, so jobs do not
     share GDX files or cplex.opt) and ixmp/config.json, which maps `platform` to db/ and sets
     message_model_dir to model/. The job sets IXMP_DATA=<job_dir>/ixmp; no other platform in
-    the config survives, so a job cannot reach any other database, ixmp-dev included."""
+    the config survives, so a job cannot reach any other database, ixmp-dev included.
+    model_source.json records where model/ came from (path, git commit, fingerprint), checked
+    against the copy, so a run can be traced to the GAMS source it solved with."""
     if kind not in COPY_KINDS:
         raise Refused(f"unknown copy kind {kind!r}; known: {sorted(COPY_KINDS)}")
     parent = area_root(area, cfg, root) / COPY_KINDS[kind]
@@ -398,16 +401,22 @@ def job_copy(seed_folder: Path, job_dir: Path, platform: str, ixmp_config: dict,
     job_dir.mkdir(parents=True)
     checked_copy(seed_folder / Path(source["source"]).name, db_dir,
                  {"kind": kind, "seed": str(seed_folder), "platform": platform})
+    source = model_source(model_src, message_ix_version)
     shutil.copytree(model_src, job_dir / "model", ignore=MODEL_IGNORE)
     for sub in ("data", "output"):
         (job_dir / "model" / sub).mkdir(exist_ok=True)
+    copied = fingerprint(job_dir / "model")
+    if copied != source["fingerprint"]:
+        raise CopyMismatch(f"{job_dir / 'model'} differs from {model_src} (did the source change during "
+                           f"the copy?): {copied} vs {source['fingerprint']}")
+    write_new(job_dir / "model_source.json", json.dumps(source, indent=2))
     url = hsqldb_url(db_dir / STEM)
     config = {k: v for k, v in ixmp_config.items() if k != "platform"}
     config["platform"] = {"default": platform, platform: {"class": "jdbc", "driver": "hsqldb", "url": url}}
     config["message_model_dir"] = str(job_dir / "model")
     (job_dir / "ixmp").mkdir()
     write_new(job_dir / "ixmp" / "config.json", json.dumps(config, indent=2), mode=0o600)
-    return {"job_dir": str(job_dir), "IXMP_DATA": str(job_dir / "ixmp"), "url": url}
+    return {"job_dir": str(job_dir), "IXMP_DATA": str(job_dir / "ixmp"), "url": url, "model_source": source}
 
 
 def job_close(job_dir: Path) -> dict:

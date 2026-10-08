@@ -181,6 +181,8 @@ def cmd_job_copy(args) -> int:
     if os.environ.get("IXMP_DATA"):
         raise Refused(f"IXMP_DATA is already set ({os.environ['IXMP_DATA']}): job-copy reads the "
                       "shared ixmp config and must run before the job switches to its own")
+    import message_ix
+
     from ixmp_copies.platforms import ixmp_config
 
     cfg = config_mod.load()
@@ -188,7 +190,7 @@ def cmd_job_copy(args) -> int:
     shared = json.loads(Path(ixc.path).read_text())
     model_src = Path(ixc.get("message model dir"))
     out = copies.job_copy(Path(args.seed), Path(args.job_dir), args.platform or cfg.platform, shared,
-                          model_src, args.area, cfg, kind=args.kind)
+                          model_src, args.area, cfg, kind=args.kind, message_ix_version=message_ix.__version__)
     print(json.dumps(out, indent=2))
     return 0
 
@@ -283,8 +285,10 @@ def cmd_merge(args) -> int:
     finally:
         src_mp.close_db()
     copies.require_closed(dst)
+    source = job_dir / "model_source.json"
     out.update({"job_dir": str(job_dir), "into": into, "into_db": str(dst), "label": label,
-                "pre_merge_backup": str(backup_dir), "merge_source_copy": str(src_dir)})
+                "pre_merge_backup": str(backup_dir), "merge_source_copy": str(src_dir),
+                "model_source": json.loads(source.read_text()) if source.exists() else None})
     record = _record(cfg, f"merge_{label}_{args.scenario}_v{version}_{stamp}", out)
     print(json.dumps(out, indent=2, default=str))
     print(f"record {record}")

@@ -117,3 +117,20 @@ unforeseen failure, never a refusal.
   for bit equality.
 - `ixmp.config.get("message model dir")` exists only after `import message_ix`; any project code
   reading it must import message_ix first.
+
+## Which GAMS source a run used
+
+A solve runs the GAMS files in the ixmp config's `message_model_dir`, wherever the venv's Python
+`message_ix` comes from. Each job copies that folder fresh (so concurrent solves never share
+`cplex.opt`, GDX files or listings) and writes `<job>/model_source.json`: the source path, the git
+commit of its checkout, uncommitted changes to the GAMS source, a fingerprint of the source files,
+and the message_ix version label. Merge records carry it. Read the commit, not the label: an
+editable install keeps the label it had when installed, so after the checkout moves the label
+names old code. The fingerprint ignores run folders, solver option files, GAMS scratch and hidden
+paths, and is equal on two machines exactly when their GAMS sources are byte-identical.
+
+`ixmp-copies doctor` reports, here and on the cluster, the GAMS source in use and warns when
+(a) solves use a different folder than the imported message_ix's own `model/` (Python and GAMS
+from two releases), (b) the version label names another commit than the checkout, or (c) the GAMS
+source has uncommitted changes. Several venvs importing one editable `message_ix` checkout share
+its version: moving that checkout for one project changes every project using it.
