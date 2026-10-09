@@ -167,8 +167,11 @@ from_seed=$(remote "$SUBMIT job_merge_from_seed.do AREA=test SEED=$AREA/seeds/se
 wait_for "$from_seed"
 resubmitted=$(remote "$SUBMIT job_merge_from_seed.do AREA=test SEED=$AREA/seeds/seed2 MAIN=$MAIN SCENARIOS=standard_extra -- $SMALL --job-name=merge_into_results --dependency=singleton")
 wait_done "$resubmitted"
-remote "grep -h 'was merged into\|^Exit:' $AREA/runs/ixc_merge_from_seed_$resubmitted.out"
-remote "grep -q 'was merged into' $AREA/runs/ixc_merge_from_seed_$resubmitted.out"
+# The log is named after the job name given above. Refused either by an earlier merge record or,
+# for a seed's default version (known only once the copy is open), by the main's own marker.
+log_r="$AREA/runs/merge_into_results_$resubmitted.out"
+remote "grep -h 'was merged into\|already merged\|^Exit:' $log_r"
+remote "grep -q 'was merged into\|already merged' $log_r"
 
 say "collect, and check the records"
 ixc collect --area test
