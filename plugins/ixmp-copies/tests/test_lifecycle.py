@@ -128,7 +128,8 @@ def test_submit_merges_resubmits_only_what_is_missing(project, tmp_path):
     rec = runs / "submitted_batch_into_results_1.txt"
     lines = [f"batch batch seed {area}/seeds/s main {area}/mains/results code {code} runs_file x",
              f"run a_1 job=1 dir={jobs['a_1']} scenario=sa merge=2 cmd=x",   # merged
-             f"run b_3 job=3 dir={jobs['b_3']} scenario=sb merge=4 cmd=x",   # merge failed
+             f"run b_3 job=3 dir={jobs['b_3']} scenario=sb merge=4 "         # merge failed; its command
+             "cmd=python run.py --scenario=bad --out-dir=results job=9 merge=2",  # mimics every field
              f"run c_5 job=5 dir={area}/jobs/c_5 scenario=sc merge=6 cmd=x",  # run still running
              f"run d_7 job=7 dir={area}/jobs/d_7 scenario=sd merge=8 cmd=x",  # run failed
              f"run e_9 job=9 dir={jobs['e_9']} scenario=se merge=10 cmd=x",  # completed, not closed
@@ -169,3 +170,40 @@ def test_submit_merges_resubmits_only_what_is_missing(project, tmp_path):
     assert len(new) == 1 and "|sc|" in new[0] and "afterok:5,singleton" in new[0], new
     assert "skip b_3: merge 101 is COMPLETED" in again.stdout
     assert os.access(code / ".ixmp_copies/slurm/job_merge_from_seed.do", os.X_OK)
+
+
+def test_cleanup_keeps_uncollected_records_and_run_outputs(project, tmp_path):
+    cfg, hd = project
+    area, job = _area(cfg, hd, tmp_path)
+    a = job("a_1")
+    _record(cfg, a, "s")
+    (a / "code" / cfg.records).mkdir(parents=True)
+    (a / "code" / cfg.records / "run_a.json").write_text('{"solved": 1}')
+    b = job("b_2")
+    _record(cfg, b, "s")
+    (b / "results.csv").write_text("x")  # a run's output in $IXC_JOB_DIR
+    plan = dbc.cleanup_plan(cfg, "test", "results")
+    kept = {j.name: why for j, why in plan["keep"]}
+    assert "run_a.json" in kept["a_1"] and "collect" in kept["a_1"]
+    assert "results.csv" in kept["b_2"] and not plan["delete"]
+    (cfg.records_dir / "run_a.json").write_text('{"solved": 0}')  # collected, but it differs
+    assert "run_a.json" in dict((j.name, w) for j, w in dbc.cleanup_plan(cfg, "test", "results")["keep"])["a_1"]
+    (cfg.records_dir / "run_a.json").write_text('{"solved": 1}')
+    plan = dbc.cleanup_plan(cfg, "test", "results", include_outputs=True)
+    assert sorted(j.name for j, _ in plan["delete"]) == ["a_1", "b_2"]
+
+
+def test_collect_updates_a_submission_record_that_grew(project, tmp_path):
+    cfg, hd = project
+    runs = hd / "ixmp_test" / "runs"
+    runs.mkdir(parents=True)
+    rec = runs / "submitted_batch_into_results_1.txt"
+    rec.write_text("batch b\nrun a_1 job=1 merge=2\n")
+    assert stage.collect(cfg, hd / "ixmp_test")["copied"] == [rec.name]
+    rec.write_text(rec.read_text() + "remerge a_1 run=1 merge=5\n")  # submit_merges.sh appends
+    out = stage.collect(cfg, hd / "ixmp_test")
+    assert out["updated"] == [rec.name] and not out["conflicts"]
+    assert (cfg.records_dir / rec.name).read_text().endswith("merge=5\n")
+    rec.write_text("rewritten\n")  # not an extension of what was collected: never overwritten
+    clash = stage.collect(cfg, hd / "ixmp_test")
+    assert clash["conflicts"] and (cfg.records_dir / rec.name).read_text().endswith("merge=5\n")

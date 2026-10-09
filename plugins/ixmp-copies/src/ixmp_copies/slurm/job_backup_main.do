@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ixc_backup_main
 #SBATCH --time=01:00:00
-#SBATCH --partition=generic
 #SBATCH --mem=4G
 #SBATCH --cpus-per-task=1
 #SBATCH --output=%x_%j.out

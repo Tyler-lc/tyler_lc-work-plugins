@@ -15,6 +15,8 @@
 set -euo pipefail
 : "${CODE:?}" "${AREA:?}"
 SEED="${1:?SEED}"; MAIN="${2:?MAIN}"; RUNS_FILE="${3:?RUNS_FILE}"
+# common.sh changes directory: paths given relative to the caller's folder are made absolute first.
+SEED="$(realpath -m "$SEED")"; MAIN="$(realpath -m "$MAIN")"; RUNS_FILE="$(realpath -m "$RUNS_FILE")"
 # The login node's own python may predate tomllib: use the jobs' modules and venv.
 set +u; source "$CODE/.ixmp_copies/slurm/common.sh"; set -u
 D="$CODE/.ixmp_copies/slurm"
@@ -38,7 +40,7 @@ while read -r name scenario cmd; do
     # Values go through the environment (--export=ALL): --export=VAR=value splits on commas.
     # shellcheck disable=SC2086
     merge_scenario=""; [ "$scenario" != "-" ] && merge_scenario="$scenario"
-    run=$(CODE="$CODE" AREA="$AREA" SEED="$SEED" NAME="$name" CMD="$cmd" MERGE_SCENARIO="$merge_scenario" \
+    run=$(CODE="$CODE" AREA="$AREA" SEED="$SEED" NAME="$name" CMD="$cmd" MERGE_SCENARIO="$merge_scenario" MODEL="${MODEL:-}" \
         sbatch --parsable --export=ALL --partition="$IXC_PARTITION" --job-name="$name" "${DEP[@]}" \
         ${RUN_OPTS:-} "$D/job_run.do")
     line="run $name job=$run dir=$JOBS/${name}_${run}"

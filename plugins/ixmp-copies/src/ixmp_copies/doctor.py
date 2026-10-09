@@ -92,7 +92,7 @@ def _local(cfg: Config) -> list[Check]:
 # GAMS source solves use, and which message_ix the venv imports.
 REPORT = """
 import json, pathlib, ixmp, message_ix
-cfg = ixmp.config.get("message model dir")
+cfg = str(ixmp.config.get("message model dir"))  # a str or a Path, depending on the ixmp version
 pkg = str(pathlib.Path(message_ix.__file__).parent / "model")
 print("IXC_REPORT " + json.dumps({"config_dir": cfg, "package_dir": pkg,
       "source": model_source(pathlib.Path(cfg), message_ix.__version__)}))
@@ -132,20 +132,41 @@ def _remote(cfg: Config) -> list[Check]:
                       "shared connection (SETUP.md, step 1); remaining cluster checks skipped")]
     user = probe.stdout.strip().splitlines()[-1]
     out = [Check(f"ssh {cfg.ssh_host} without a prompt", "ok", f"as {user}")]
-    root = cfg.remote_hdrive.format(remote_user=user, user=user)
+    if cfg.cluster_user and cfg.cluster_user != user:
+        out.append(Check("[cluster] user is the account ssh logs in as", "FAIL",
+                         f"config {cfg.cluster_user!r}, ssh {user!r}", f"set [cluster] user = \"{user}\""))
+    root = cfg.remote_hdrive.format(cluster_user=user, remote_user=user, user=user)
     ok = ssh(f"test -d {shlex.quote(root)} && test -w {shlex.quote(root)}").returncode == 0
     out.append(Check("H drive on the cluster", "ok" if ok else "FAIL", root,
                      "fix [cluster] remote_hdrive: the same share as [storage] roots, as the cluster sees it"))
+    # Jobs find the share through [storage] roots, expanded on the cluster: the first one there
+    # that exists and holds something is the one they use.
+    roots = [r.format(cluster_user=user, user=user) for r in cfg.roots]
+    probe_roots = "; ".join(f'r={shlex.quote(r) if not r.startswith("~") else "$HOME" + shlex.quote(r[1:])}; '
+                            'test -d "$r" && [ -n "$(ls -A "$r" | head -c 1)" ] && { echo "$r"; exit 0; }'
+                            for r in roots) + "; exit 1"
+    found = ssh(probe_roots, timeout=60)
+    out.append(Check("[storage] roots reach the share on the cluster", "ok" if found.returncode == 0 else "FAIL",
+                     found.stdout.strip() or f"none of {roots}",
+                     "list the cluster's path of the share in [storage] roots (at IIASA: /hdrive/all_users/<user>)"))
     venv = cfg.venv.replace("~", "$HOME", 1) if cfg.venv.startswith("~") else shlex.quote(cfg.venv)
     modules = " ".join(f"module load {shlex.quote(m)};" for m in cfg.modules)
     env = f"source {shlex.quote(cfg.lmod_init)} && module purge && {modules} source {venv}/bin/activate"
-    py = ssh(f"{env} && python -c 'import ixmp, message_ix; print(ixmp.__version__, message_ix.__version__)'",
-             timeout=180)
-    out.append(Check("cluster venv imports ixmp and message_ix", "ok" if py.returncode == 0 else "FAIL",
-                     (py.stdout or py.stderr).strip()[-300:],
+    py = ssh(f"{env} && python -c 'import sys, ixmp, message_ix; print(sys.version_info >= (3, 11), "
+             f"sys.version.split()[0], ixmp.__version__, message_ix.__version__, ixmp.config.path)'", timeout=180)
+    fields = py.stdout.strip().splitlines()[-1].split() if py.returncode == 0 and py.stdout.strip() else []
+    out.append(Check("cluster venv imports ixmp and message_ix", "ok" if fields else "FAIL",
+                     " ".join(fields[1:4]) if fields else (py.stdout or py.stderr).strip()[-300:],
                      "build the venv on the cluster with the module Python (SETUP.md, step 3) or fix "
                      "[cluster] venv / modules / lmod_init"))
-    if py.returncode == 0:
+    if fields:
+        out.append(Check("cluster venv is Python 3.11 or newer", "ok" if fields[0] == "True" else "FAIL",
+                         fields[1], "rebuild the cluster venv on Python 3.11+ (the tool reads its config with tomllib)"))
+        out.append(Check("an ixmp config file on the cluster", "ok" if fields[4] != "None" else "FAIL",
+                         fields[4], "on the login node, register any platform once (e.g. `ixmp platform add "
+                         "local jdbc hsqldb ~/.local/share/ixmp/localdb/default`) so ixmp writes its config file; "
+                         "job-copy copies its settings"))
+    if fields:
         script = Path(provenance.__file__).read_text() + REPORT
         rep = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", cfg.ssh_host,
                               f"bash -lc {shlex.quote(env + ' && python -')}"],
@@ -178,6 +199,9 @@ def run(remote: bool = True) -> list[Check]:
     except ConfigError as err:
         return [Check("project config", "FAIL", str(err), "ixmp-copies init, at the project root")]
     checks = [Check("project config", "ok", str(cfg.path))]
+    if not cfg.cluster_user:
+        checks.append(Check("[cluster] user set", "warn", "empty: paths use the local account's name",
+                            "set [cluster] user to your cluster account"))
     checks += _local(cfg)
     checks += _remote(cfg) if remote else [Check("cluster checks", "skip", "--local")]
     return checks

@@ -48,10 +48,23 @@ def _ok(result: subprocess.CompletedProcess, what: str) -> str:
     return result.stdout.decode(errors="replace").strip()
 
 
+def cluster_whoami(host: str) -> str | None:
+    """The account `ssh host` logs in as, or None when the connection does not answer."""
+    try:
+        out = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "whoami"],
+                             capture_output=True, text=True, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
 def remote_root(cfg: Config, remote: Remote) -> str:
-    """The H-drive root as the cluster sees it; {remote_user} is the cluster account."""
+    """The H-drive root as the cluster sees it, for the account the connection logs in as;
+    refuses when that is not [cluster] user."""
     user = _ok(remote("whoami", None), "ssh whoami (is the SSH connection open?)")
-    return cfg.remote_hdrive.format(remote_user=user, user=user)
+    if cfg.cluster_user and cfg.cluster_user != user:
+        raise Refused(f"the connection logs in as {user!r}, but [cluster] user is {cfg.cluster_user!r}")
+    return cfg.remote_hdrive.format(cluster_user=user, remote_user=user, user=user)
 
 
 def _shell_path(path: str) -> str:
@@ -147,9 +160,10 @@ def stage(cfg: Config, area: str, extras: list[str], remote: Remote) -> str:
 def collect(cfg: Config, area_dir: Path) -> dict[str, list[str]]:
     """Copy records (json) written in the area's snapshots (<area>/code/*/) and job copies
     (<area>/jobs/*/code/), plus the submission records in <area>/runs/, into the project's
-    records folder. Returns copied, already present (identical) and conflicting names; a
-    conflict is never overwritten."""
-    out = {"copied": [], "present": [], "conflicts": []}
+    records folder. A json record is write-once; a submission record only grows (submit_merges.sh
+    appends to it), so a copy that is a prefix of the source is updated. Returns copied, updated,
+    already present (identical) and conflicting names; a conflict is never overwritten."""
+    out = {"copied": [], "updated": [], "present": [], "conflicts": []}
     dest = cfg.records_dir
     dest.mkdir(parents=True, exist_ok=True)
     sources = [*area_dir.glob(f"code/*/{cfg.records}/*.json"),
@@ -162,6 +176,9 @@ def collect(cfg: Config, area_dir: Path) -> dict[str, list[str]]:
             out["copied"].append(src.name)
         elif filecmp.cmp(src, target, shallow=False):
             out["present"].append(src.name)
+        elif src.suffix == ".txt" and src.read_bytes().startswith(target.read_bytes()):
+            shutil.copy2(src, target)
+            out["updated"].append(src.name)
         else:
             out["conflicts"].append(f"{src} differs from {target}")
     return out

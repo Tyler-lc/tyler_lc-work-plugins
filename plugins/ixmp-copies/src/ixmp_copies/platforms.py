@@ -25,6 +25,11 @@ class AlreadyMerged(ValueError):
     """The version a merge would bring in is already on the target (its marker is there)."""
 
 
+class PlatformError(ValueError):
+    """A platform name this process's ixmp config does not know, or not a HyperSQL file
+    database where one is needed."""
+
+
 def hsqldb_file(platform_info: dict) -> Path:
     """The database file stem of a file-backed HyperSQL platform, from its ixmp config entry
     (`ixmp.config.get_platform_info(name)[1]`): `path`, or the file part of a
@@ -40,11 +45,23 @@ def hsqldb_file(platform_info: dict) -> Path:
     return Path(url[len(prefix):].split(";", 1)[0]).expanduser()
 
 
-def platform_db(name: str) -> Path:
-    """The database stem of the platform `name` in this process's ixmp config."""
+def platform_info(name: str) -> dict:
     import ixmp
 
-    return hsqldb_file(ixmp.config.get_platform_info(name)[1])
+    try:
+        return ixmp.config.get_platform_info(name)[1]
+    except ValueError as err:
+        raise PlatformError(f"{err} (ixmp config {ixmp.config.path})") from err
+
+
+def platform_db(name: str) -> Path:
+    """The database stem of the platform `name` in this process's ixmp config."""
+    try:
+        return hsqldb_file(platform_info(name))
+    except PlatformError:
+        raise
+    except ValueError as err:
+        raise PlatformError(f"platform {name!r}: {err}") from err
 
 
 def ixmp_config():
@@ -57,9 +74,7 @@ def ixmp_config():
 
 
 def is_hsqldb(name: str) -> bool:
-    import ixmp
-
-    return ixmp.config.get_platform_info(name)[1].get("driver") == "hsqldb"
+    return platform_info(name).get("driver") == "hsqldb"
 
 
 def read_registry(mp) -> dict:
@@ -151,7 +166,7 @@ def compare_copy(original, copy, tol_obj: float = 1e-9) -> dict:
         failures.append(f"solution flag {solved[0]} -> {solved[1]}")
     elif solved[0]:
         obj = (float(original.var("OBJ")["lvl"]), float(copy.var("OBJ")["lvl"]))
-        if abs(obj[1] / obj[0] - 1.0) > tol_obj:
+        if abs(obj[1] - obj[0]) > tol_obj * max(abs(obj[0]), 1.0):
             failures.append(f"OBJ {obj[0]} -> {obj[1]}")
     return {"ok": not failures, "failures": failures, "rows": rows, "timeseries_rows": ts,
             "solved": solved, "OBJ": obj}
@@ -200,3 +215,18 @@ def merge_scenario(src_mp, dst_mp, model: str, scenario: str, version: int,
     return {"model": model, "scenario": scenario, "source_version": version,
             "merged_version": int(copy.version), "was_default_in_job": was_default,
             "set_default": was_default and check["ok"], "marker": marker, "compare": check}
+
+
+def scenario_state(mp, model: str, scenario: str) -> dict:
+    """The versions of `scenario` on `mp`, its default version (None without one) and whether
+    that version has a solution. What a run job records before and after its command, so a merge
+    can tell the run's result from a version the run found already there."""
+    import message_ix
+
+    listed = versions(mp, model, scenario, default=False)
+    default_rows = versions(mp, model, scenario, default=True)
+    default = int(default_rows["version"].iloc[0]) if len(default_rows) else None
+    solved = (message_ix.Scenario(mp, model, scenario, version=default).has_solution()
+              if default is not None else False)
+    return {"model": model, "scenario": scenario, "versions": sorted(int(v) for v in listed["version"]),
+            "default": default, "solved": bool(solved)}

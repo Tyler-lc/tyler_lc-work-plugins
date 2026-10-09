@@ -65,14 +65,14 @@ def _src(version="3.11.2.dev86+g79e880969", commit="b0ded639d0000", changed=()):
 
 def test_assess(tmp_path):
     a, b = str(tmp_path / "a"), str(tmp_path / "b")
-    # the WH venv on UniCC: same folder, label from an older commit
+    # an editable install whose checkout moved on: same folder, label from an older commit
     got = pv.assess(a, a, _src())
     assert got[0][0] == "ok" and any(s == "warn" and "misreports" in m for s, m in got)
-    # the EFC venv: same folder, label matches
+    # an editable install installed at its checkout's commit: same folder, label matches
     assert [s for s, _ in pv.assess(a, a, _src("3.11.2.dev147+gb0ded639d.d20260529"))] == ["ok"]
-    # the era venv: a released package, GAMS from elsewhere; the label check does not apply
-    era = pv.assess(a, b, _src("3.11.1"))
-    assert [s for s, _ in era] == ["warn"] and "two releases" in era[0][1]
+    # a released package with GAMS from a checkout elsewhere; the label check does not apply
+    mixed = pv.assess(a, b, _src("3.11.1"))
+    assert [s for s, _ in mixed] == ["warn"] and "two releases" in mixed[0][1]
     # a different folder whose label disagrees: only the mismatch is reported
     assert [s for s, _ in pv.assess(a, b, _src())] == ["warn"]
     assert any("uncommitted" in m for _, m in pv.assess(a, a, _src(commit=None, changed=[" M x.gms"])))

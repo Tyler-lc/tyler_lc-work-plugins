@@ -27,6 +27,7 @@ import re
 import shutil
 import socket
 import stat
+import subprocess
 import time
 from pathlib import Path
 
@@ -46,6 +47,16 @@ COPY_KINDS = {"job": "jobs", "main": "mains"}
 NAME = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 # A job that merges several scenarios lists them here, so cleanup can tell one that failed.
 EXPECTED_MERGES = "expected_merges.txt"
+# What a run job records about its scenario before and after its command (run-mark): the
+# evidence a merge needs that the version it brings back is the run's result.
+RUN_BEFORE = "run_before.json"
+RUN_RESULT = "run_result.json"
+# A job copy made only to merge scenarios from a seed names that seed here; its merges are
+# marked by the seed, so resubmitting them cannot land a scenario twice.
+SEED_MERGE = "seed_merge.txt"
+# What a job folder holds besides output a run wrote into it.
+JOB_PARTS = {"db", "model", "ixmp", "code", "tmp", "result.json", "model_source.json", EXPECTED_MERGES,
+             RUN_BEFORE, RUN_RESULT, SEED_MERGE}
 # GAMS scratch folders (225a, 225b, ...), listings, logs and GDX files are run output, not
 # model source; a job's model folder starts without them.
 MODEL_IGNORE = shutil.ignore_patterns("225*", "*.lst", "*.log", "*.gdx", "*.~*")
@@ -59,25 +70,34 @@ class CopyMismatch(RuntimeError):
     """The copy differs from the source, or the source changed while it was copied."""
 
 
+PROBE_SECONDS = 10
+
+
 def reachable(root: Path) -> bool:
-    # A CIFS mount whose server is unreachable (VPN down) raises OSError "Host is down"
-    # rather than reporting an empty folder; either way there is no H drive to use.
+    """True when `root` is a folder with something in it, answered within PROBE_SECONDS. An
+    unmounted mount point is an empty folder; a CIFS mount whose server is gone (VPN down) hangs
+    or raises "Host is down". The probe runs in a child process, so a hang costs the timeout and
+    is never waited for."""
+    probe = subprocess.Popen(["sh", "-c", 'test -d "$1" && [ -n "$(ls -A "$1" | head -c 1)" ]', "sh", str(root)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        return root.is_dir() and any(root.iterdir())
-    except OSError:
+        return probe.wait(timeout=PROBE_SECONDS) == 0
+    except subprocess.TimeoutExpired:
+        probe.kill()
         return False
 
 
 def hdrive_candidates(cfg: Config) -> list[Path]:
-    return [Path(expand(r)) for r in cfg.roots]
+    return [Path(expand(r, cfg.cluster_user)) for r in cfg.roots]
 
 
 def hdrive_root(cfg: Config) -> Path:
     for root in hdrive_candidates(cfg):
         if reachable(root):
             return root
-    raise FileNotFoundError(f"no H drive mounted and reachable at any of "
-                            f"{[str(r) for r in hdrive_candidates(cfg)]} (VPN down, or mount missing?)")
+    raise Refused(f"no H drive mounted and reachable at any of {[str(r) for r in hdrive_candidates(cfg)]}: "
+                  "connect the VPN and mount the share (on WSL after every reboot or VPN drop), "
+                  "or fix [storage] roots")
 
 
 def area_root(area: str, cfg: Config, root: Path | None = None) -> Path:
@@ -167,10 +187,23 @@ def require_cached_tables(db: Path) -> int:
     return types["cached"]
 
 
+def _writable(proc: Path, fd: Path) -> bool:
+    # fdinfo's "flags" is octal; the access mode is its lowest two bits (0 = read-only).
+    try:
+        flags = next(ln for ln in (proc / "fdinfo" / fd.name).read_text().splitlines() if ln.startswith("flags:"))
+    except (OSError, StopIteration):
+        return True
+    return int(flags.split()[1], 8) & 0o3 != 0
+
+
 def processes_holding(db: Path) -> list[str]:
-    """'pid cmdline' of every process (readable to this user) with a file of `db` open.
-    Sees this host only: across hosts, require_closed rests on HyperSQL's own markers."""
+    """'pid cmdline' of every process (readable to this user) with a file of `db` open for
+    writing. Readers are no risk to a copy, and two jobs copying one read-only seed are each
+    other's readers. Paths are compared resolved: the kernel reports the real path, while `db`
+    may be spelled through a symlink (on UniCC ~/hdrive points to /hdrive/...). Sees this host
+    only: across hosts, require_closed rests on HyperSQL's own markers."""
     prefix = f"{db.name}."
+    parent = db.parent.resolve()
     holders = []
     proc_root = Path("/proc")
     if not proc_root.is_dir():
@@ -179,11 +212,11 @@ def processes_holding(db: Path) -> list[str]:
         if not proc.name.isdigit():
             continue
         try:
-            targets = [Path(os.readlink(fd)) for fd in (proc / "fd").iterdir()]
+            fds = [(fd, Path(os.readlink(fd))) for fd in (proc / "fd").iterdir()]
             cmd = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
         except (PermissionError, FileNotFoundError, ProcessLookupError):
             continue
-        if any(t.parent == db.parent and t.name.startswith(prefix) for t in targets):
+        if any(t.parent == parent and t.name.startswith(prefix) and _writable(proc, fd) for fd, t in fds):
             holders.append(f"{proc.name} {cmd.strip()[:160]}")
     return holders
 
@@ -361,14 +394,22 @@ def seed_from_job(job_dir: Path, area: str, name: str, cfg: Config,
     return dest, manifest, make_read_only(dest)
 
 
+def require_restore_dest(dest: Path, cfg: Config) -> None:
+    """A restore goes to a new folder on a local disk: refuse one that exists or is on the share."""
+    for path in (dest, dest.with_name(dest.name + PARTIAL)):
+        if path.exists():
+            raise Refused(f"{path} already exists")
+    for base in hdrive_candidates(cfg):
+        if reachable(base) and base.resolve() in dest.resolve().parents:
+            raise Refused(f"{dest} is on the H drive: restore to a local disk")
+
+
 def restore(backup_folder: Path, dest: Path, cfg: Config) -> dict:
     """A working database from a verified backup, in the new folder `dest` (never over an
     existing one, never on the H drive). Registering it with ixmp is the caller's step:
     nothing here edits the ixmp config."""
     source = require_verified(backup_folder, "backup")
-    for base in hdrive_candidates(cfg):
-        if reachable(base) and base.resolve() in dest.resolve().parents:
-            raise Refused(f"{dest} is on the H drive: restore to a local disk")
+    require_restore_dest(dest, cfg)
     return checked_copy(backup_folder / Path(source["source"]).name, dest,
                         {"kind": "restore", "from_backup": str(backup_folder)})
 
@@ -435,6 +476,38 @@ def job_close(job_dir: Path) -> dict:
     return result
 
 
+def cluster_spelling(path: Path, cfg: Config) -> str | None:
+    """`path` (on the share, as this machine sees it) as the cluster spells it: what a job
+    script's BACKUP=, SEED= or MAIN= needs. None for a path that is not on the share."""
+    user = cfg.cluster_user or "<cluster user>"
+    remote = cfg.remote_hdrive.format(cluster_user=user, remote_user=user, user=user)
+    for root in hdrive_candidates(cfg):
+        if reachable(root) and root.resolve() in path.resolve().parents:
+            return f"{remote}/{path.resolve().relative_to(root.resolve())}"
+    return None
+
+
+def area_of(path: Path, cfg: Config) -> str | None:
+    """The area a path lies in, whichever spelling of the share it uses."""
+    return next((a for a, folder in cfg.areas.items() if within_area(str(path), folder) is not None), None)
+
+
+def find_merge_record(cfg: Config, into_db: Path, marker: str) -> str | None:
+    """The path of a passing merge record with `marker` into the database `into_db`, if one exists.
+    Lets a merge refuse an obvious repeat before it backs the target up; the target's own
+    scenario meta stays the final word."""
+    area = area_of(into_db, cfg)
+    area_dir = area_root(area, cfg) if area else cfg.records_dir / "_none"
+    for record in merge_records(cfg, area_dir):
+        if record.get("marker") != marker or not record.get("compare", {}).get("ok"):
+            continue
+        same = (within_area(record.get("into_db", ""), cfg.areas[area]) == within_area(str(into_db), cfg.areas[area])
+                if area else Path(record.get("into_db", "")).resolve() == into_db.resolve())
+        if same:
+            return record["_path"]
+    return None
+
+
 def merge_records(cfg: Config, area_dir: Path) -> list[dict]:
     """Every merge record that merges wrote: in the area's code snapshots, where merge jobs run,
     and in the project's records folder, where `collect` brings them. A record is write-once and
@@ -458,12 +531,25 @@ def within_area(path: str, area_folder: str) -> str | None:
     return None
 
 
-def cleanup_plan(cfg: Config, area: str, main: str, root: Path | None = None) -> dict[str, list]:
-    """Which job copies below <area>/jobs/ may be deleted: those whose job closed them and for
-    which a merge record shows the job's scenario merged into <area>/mains/<main> with its
-    comparison passing. Everything else is kept, with the reason. The evidence is the merge
-    record (written only after a merge's clone and comparison), not a read of the main, which
-    would need a JVM and the main closed."""
+def uncollected_records(cfg: Config, job: Path) -> list[str]:
+    """Records the job wrote in its code copy that are not, byte for byte, in the project's
+    records folder: deleting the job would lose them."""
+    missing = []
+    for path in sorted((job / "code" / cfg.records).glob("*.json")):
+        home = cfg.records_dir / path.name
+        if not home.exists() or home.read_bytes() != path.read_bytes():
+            missing.append(path.name)
+    return missing
+
+
+def cleanup_plan(cfg: Config, area: str, main: str, root: Path | None = None,
+                 include_outputs: bool = False) -> dict[str, list]:
+    """Which job copies below <area>/jobs/ may be deleted: those whose job closed them, whose
+    own records are collected, which hold no other output a run wrote into the job folder
+    (unless `include_outputs`), and for which merge records show every scenario the job was
+    meant to merge merged into <area>/mains/<main> with its comparison passing. Everything else
+    is kept, with the reason. The evidence is the merge record (written only after a merge's
+    clone and comparison), not a read of the main, which would need a JVM and the main closed."""
     area_dir = area_root(area, cfg, root)
     main_db = area_dir / COPY_KINDS["main"] / require_name(main) / "db" / STEM
     if not Path(f"{main_db}.properties").exists():
@@ -484,6 +570,16 @@ def cleanup_plan(cfg: Config, area: str, main: str, root: Path | None = None) ->
             require_closed(job / "db" / STEM)
         except Refused as err:
             plan["keep"].append((job, f"database not closed: {err}"))
+            continue
+        outputs = sorted(p.name for p in job.iterdir()
+                         if p.name not in JOB_PARTS and not p.name.startswith("merge_src_"))
+        if outputs and not include_outputs:
+            plan["keep"].append((job, f"holds files a run wrote into the job folder: {outputs} "
+                                      "(copy them out, then pass --include-outputs)"))
+            continue
+        uncollected = uncollected_records(cfg, job)
+        if uncollected:
+            plan["keep"].append((job, f"records not collected yet: {uncollected} (ixmp-copies collect)"))
             continue
         records = by_job.get(f"{COPY_KINDS['job']}/{job.name}", [])
         good = [r for r in records if within_area(r.get("into_db", ""), cfg.areas[area]) == main_rel

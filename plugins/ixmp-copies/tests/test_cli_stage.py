@@ -49,13 +49,33 @@ def test_config_errors(tmp_path, text, match):
 def test_init_template_parses_and_refuses_overwrite(tmp_path):
     proj = tmp_path / "My-Project"
     proj.mkdir()
-    out = run_cli(["init", "--model", "M", "--venv", "~/repos/.efc"], proj)
+    out = run_cli(["init", "--model", "M", "--venv", "~/repos/.venv_b", "--cluster-user", "jdoe"], proj)
     assert out.returncode == 0, out.stderr
     cfg = config.parse(proj / config.FILENAME)
-    assert cfg.platform == "my-project-local" and cfg.model == "M" and cfg.venv == "~/repos/.efc"
-    assert cfg.areas["live"] == "ixmp_copies/my_project/live"
-    again = run_cli(["init"], proj)
+    assert cfg.platform == "my-project-local" and cfg.model == "M" and cfg.venv == "~/repos/.venv_b"
+    assert cfg.areas["live"] == "ixmp_copies/my_project/live" and cfg.cluster_user == "jdoe"
+    assert [str(r) for r in dbc.hdrive_candidates(cfg)][0] == "/hdrive/all_users/jdoe"
+    assert cfg.remote_hdrive.format(cluster_user="jdoe") == "/hdrive/all_users/jdoe"
+    again = run_cli(["init", "--venv", "v", "--cluster-user", "jdoe"], proj)
     assert again.returncode == 3 and "exists" in again.stderr
+    novenv = run_cli(["init"], tmp_path)
+    assert novenv.returncode == 2 and "--venv" in novenv.stderr
+
+
+def test_init_asks_ssh_for_the_cluster_user(tmp_path):
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "ssh").write_text("#!/bin/sh\necho jdoe\n")
+    (fake / "ssh").chmod(0o755)
+    proj = tmp_path / "p1"
+    proj.mkdir()
+    out = run_cli(["init", "--venv", "v"], proj, PATH=f"{fake}:/usr/bin:/bin")
+    assert out.returncode == 0 and config.parse(proj / config.FILENAME).cluster_user == "jdoe", out.stderr
+    (fake / "ssh").write_text("#!/bin/sh\nexit 255\n")
+    proj2 = tmp_path / "p2"
+    proj2.mkdir()
+    down = run_cli(["init", "--venv", "v"], proj2, PATH=f"{fake}:/usr/bin:/bin")
+    assert down.returncode == 3 and "--cluster-user" in down.stderr and not (proj2 / config.FILENAME).exists()
 
 
 def test_where_and_refusal_exit_codes(project):
@@ -108,7 +128,7 @@ def test_merge_and_backup_dry_runs(project, tmp_path):
     dbc.job_close(job)
     main = hd / "ixmp_live" / "mains" / "results_1"
     dbc.job_copy(seed_dir, main, cfg.platform, SHARED, tmp_path / "model_src", "live", cfg, kind="main")
-    into_main = run_cli(["merge", "--job-dir", str(job), "--scenario", "s"], cfg.project_root,
+    into_main = run_cli(["merge", "--job-dir", str(job), "--scenario", "s", "--version", "1"], cfg.project_root,
                         IXMP_DATA=str(main / "ixmp"))
     want = f"pre-merge backup to {(hd / 'ixmp_live' / 'backups').resolve() / 'results_1'}/; record merge_results_1_*"
     assert into_main.returncode == 0 and want in into_main.stdout, into_main.stdout + into_main.stderr
@@ -117,7 +137,7 @@ def test_merge_and_backup_dry_runs(project, tmp_path):
     assert not (hd / "ixmp_live" / "backups").exists()
     nomodel = cfg.path.read_text().replace('model = "m"\n', "")
     cfg.path.write_text(nomodel)
-    refused = run_cli(["merge", "--job-dir", str(job), "--scenario", "s"], cfg.project_root,
+    refused = run_cli(["merge", "--job-dir", str(job), "--scenario", "s", "--version", "1"], cfg.project_root,
                       IXMP_DATA=str(main / "ixmp"))
     assert refused.returncode == 3 and "no model" in refused.stderr
     open_job = hd / "ixmp_test" / "jobs" / "unclosed"
@@ -129,11 +149,11 @@ def test_merge_and_backup_dry_runs(project, tmp_path):
 
 def test_job_env_sources_in_bash(project):
     cfg, _ = project
-    text = stage.job_env(cfg.__class__(**{**cfg.__dict__, "venv": "~/repos/.efc",
+    text = stage.job_env(cfg.__class__(**{**cfg.__dict__, "venv": "~/repos/.venv_b",
                                           "modules": ("Py/3 x", "Java")}))
     out = subprocess.run(["bash", "-c", f"{text}\necho \"$IXC_VENV|$IXC_MODULES|$IXC_PLATFORM\""],
                          capture_output=True, text=True, env={"HOME": "/home/u", "PATH": "/usr/bin:/bin"})
-    assert out.stdout.strip() == "/home/u/repos/.efc|Py/3 x Java|proj-local", out.stderr
+    assert out.stdout.strip() == "/home/u/repos/.venv_b|Py/3 x Java|proj-local", out.stderr
 
 
 def local_remote(command: str, stdin: bytes | None = None) -> subprocess.CompletedProcess:
@@ -208,7 +228,7 @@ def test_job_scripts_run_against_a_snapshot(project, tmp_path):
     env["IXMP_DATA"] = "/nonexistent"  # common.sh must unset it, or job-copy refuses
     out = subprocess.run(["bash", str(code / ".ixmp_copies/slurm/job_run.do")], capture_output=True,
                          text=True, env=env, cwd=tmp_path)
-    assert "Exit: run 0 close 0 seed 0" in out.stdout, out.stdout[-2000:] + out.stderr[-2000:]
+    assert "Exit: run 0 mark 0 close 0 seed 0" in out.stdout, out.stdout[-2000:] + out.stderr[-2000:]
     assert out.returncode == 0
     job_dir = hd / "ixmp_test" / "jobs" / "probe_42"
     assert (job_dir / "result.json").is_file()
@@ -223,14 +243,14 @@ def test_job_scripts_run_against_a_snapshot(project, tmp_path):
     failing = {**env, "NAME": "fails", "SLURM_JOB_ID": "43", "CMD": "exit 7"}
     bad = subprocess.run(["bash", str(code / ".ixmp_copies/slurm/job_run.do")], capture_output=True,
                          text=True, env=failing, cwd=tmp_path)
-    assert bad.returncode != 0 and "Exit: run 7 close 0 seed 0" in bad.stdout, bad.stdout[-1500:]
+    assert bad.returncode != 0 and "Exit: run 7 mark 0 close 0 seed 0" in bad.stdout, bad.stdout[-1500:]
 
 
 
 def test_init_sanitises_the_folder_name(tmp_path):
     proj = tmp_path / "4th-Gen.Paper"
     proj.mkdir()
-    out = run_cli(["init"], proj)
+    out = run_cli(["init", "--venv", "v", "--cluster-user", "jdoe"], proj)
     assert out.returncode == 0, out.stderr
     cfg = config.parse(proj / config.FILENAME)
     assert cfg.platform == "4th-gen-paper-local" and cfg.areas["test"] == "ixmp_copies/4th_gen_paper/test"

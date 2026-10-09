@@ -40,22 +40,24 @@ machine; ask, do not work around them.
 3. **Check** that the H drive is mounted on the workstation (`timeout 10 ls ~/hdrive`;
    SETUP.md step 2). A hang means the VPN is down.
 4. Install the tool into the project's venv (SETUP.md step 4).
-5. At the project's git root: `ixmp-copies init --model MODEL --venv 'CLUSTER_VENV'`, review the
-   file, commit it.
+5. At the project's git root: `ixmp-copies init --venv 'CLUSTER_VENV' --model MODEL --cluster-user USER`,
+   review the file, commit it.
 6. `ixmp-copies platform-add` (dry run), then `--apply`, if the platform is not registered yet.
 7. `ixmp-copies doctor`. Fix every `FAIL` with the printed fix; report each `warn` to the user.
 8. Optionally `bash trial/new_project_trial.sh <empty dir> 'CLUSTER_VENV'` (SETUP.md step 8) to
    run one real job and merge; it should end with `TRIAL PASSED`.
 
-Then follow the skill for the work itself. Never copy, move or delete database files by hand,
-and never script around a refusal (exit 3): report it.
+Then follow the skill for the work itself. A run's command must solve its scenario and call
+`set_as_default()` on the result: the merge brings back exactly the version the run left as
+default, and a run that left none fails. Never copy, move or delete database files by hand, and
+never script around a refusal (exit 3): report it.
 
 ## Commands
 
 ```
 ixmp-copies init | platform-add | doctor | where
 ixmp-copies backup | restore | verify | seed | stage | collect | cleanup | transfer
-ixmp-copies job-copy | job-check | job-close | merge        # inside jobs, via the templates
+ixmp-copies job-copy | job-check | run-mark | job-close | merge   # inside jobs, via the templates
 ```
 
 ## Tests

@@ -31,12 +31,14 @@ means the connection expired: log in once again.
 
 ## 2. The H drive, from both sides
 
-Copies, seeds and job folders live on the H drive. On UniCC it is `/hdrive/all_users/<user>`
-(also reachable as `~/hdrive`). On a Linux or WSL workstation, mount the same share at
-`~/hdrive`, e.g. in `/etc/fstab`:
+Copies, seeds and job folders live on the H drive. At IIASA it is always
+`/hdrive/all_users/<IIASA user>` on the cluster (`~/hdrive` there is a symlink to it). On a Linux
+or WSL workstation, mount the same share; mounting it at that same path,
+`/hdrive/all_users/<IIASA user>`, gives every path one spelling on both sides. The default
+`[storage] roots` try that path first and `~/hdrive` second. In `/etc/fstab`:
 
 ```
-//<file server>/<your home share> /home/<you>/hdrive cifs credentials=/home/<you>/.smbcred,uid=<uid>,gid=<gid>,_netdev,nofail 0 0
+//<file server>/<your home share> /hdrive/all_users/<IIASA user> cifs credentials=/home/<you>/.smbcred,uid=<uid>,gid=<gid>,_netdev,nofail 0 0
 ```
 
 (`<file server>/<your home share>` is the UNC path Windows shows for your H drive, with `/` for
@@ -44,8 +46,8 @@ Copies, seeds and job folders live on the H drive. On UniCC it is `/hdrive/all_u
 when the VPN drops, the mount hangs or reports `Host is down`, and the tool refuses to use it.
 WSL does not mount it on its own: after every reboot of the machine, and after the VPN drops,
 mount it again with `sudo mount ~/hdrive`. Until then `~/hdrive` is an empty folder, which
-`ls` happily lists; `doctor` reports it as not reachable.
-Mounted elsewhere, list your mount point first in `[storage] roots`.
+`ls` happily lists; `doctor` reports it as not reachable. Mounted anywhere else, list that
+mount point in `[storage] roots`.
 
 ## 3. A Python environment on the cluster
 
@@ -88,11 +90,13 @@ uv pip install --python <venv>/bin/python -e <clone>/plugins/ixmp-copies
 At the project's git repository root:
 
 ```bash
-ixmp-copies init --model MODEL --venv '~/repos/.venv_myproject'
+ixmp-copies init --venv '~/repos/.venv_myproject' --model MODEL --cluster-user <IIASA user>
 ```
 
-It writes `ixmp_copies.toml`, every key commented, and names the project and its platform after
-the folder (`--name`, `--platform` to choose). Check `[cluster] modules` and `gams_module`
+`--venv` is the project's venv on the cluster (step 3), required: never another project's.
+`--cluster-user` is your cluster account; without it, `init` asks `ssh unicc whoami`. It writes
+`ixmp_copies.toml`, every key commented, and names the project and its platform after the folder
+(`--name`, `--platform` to choose). Check `[cluster] modules` and `gams_module`
 against `module avail` on the cluster, and `[storage] roots` against your mount. The folders on
 the H drive default to `ixmp_copies/<project>/{test,live,backups}`. Commit the file: `stage`
 ships the committed tree.
@@ -130,9 +134,16 @@ ixmp-copies doctor          # until nothing fails; warnings explain themselves
 ```
 
 Then the acceptance trial, which builds a throwaway project with message_ix's small Dantzig model
-and runs the whole chain on the cluster: seed, results main, two solves in parallel on their own
-copies, both merges, records collected. It needs pytest in the workstation venv (message_ix's
-test model imports it) and writes on the H drive only below `ixmp_copies/trial_<time>/`:
+and runs the whole chain on the cluster:
+- a seed and a results main
+- two solves in parallel on their own copies, and their merges
+- a solve that forgets `set_as_default()`: its job fails and nothing is merged
+- a merge cancelled on purpose, recovered with `submit_merges.sh`
+- a scenario made on the workstation afterwards, merged from a newer seed
+- `collect`, then `cleanup` of every merged job copy
+
+It needs pytest in the workstation venv (message_ix's test model imports it) and writes on the H
+drive only below `ixmp_copies/trial_<time>/`:
 
 ```bash
 bash <clone>/plugins/ixmp-copies/trial/new_project_trial.sh /tmp/ixc_trial '~/repos/.venv_myproject'

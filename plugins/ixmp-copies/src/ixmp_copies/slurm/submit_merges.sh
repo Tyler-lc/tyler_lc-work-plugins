@@ -14,6 +14,7 @@ set -euo pipefail
 : "${CODE:?}"
 REC="${1:?submission record}"
 [ -f "$REC" ] || { echo "no $REC" >&2; exit 1; }
+REC="$(realpath "$REC")"  # common.sh changes directory
 set +u; source "$CODE/.ixmp_copies/slurm/common.sh"; set -u
 D="$CODE/.ixmp_copies/slurm"
 MAIN=$(awk '/^batch /{for (i = 1; i <= NF; i++) if ($i == "main") print $(i + 1)}' "$REC")
@@ -22,12 +23,17 @@ MAIN_NAME=$(basename "$MAIN")
 cd "$(dirname "$REC")"
 state() { sacct -n -X -P -o State -j "$1" 2>/dev/null | head -1 | awk '{print $1}'; }
 echo "merges resubmitted $(date -Is) from $CODE" >> "$REC"
-grep -E '^run .*scenario=' "$REC" | while read -r _ name rest; do
-    run=$(echo "$rest" | grep -o 'job=[0-9]*' | cut -d= -f2)
-    dir=$(echo "$rest" | grep -o 'dir=[^ ]*' | cut -d= -f2)
-    scenario=$(echo "$rest" | grep -o 'scenario=[^ ]*' | cut -d= -f2)
+# An absent field is empty, not an error: under set -e and pipefail a grep that finds nothing
+# would end the script and silently drop every run after that line.
+field() { echo " $1" | grep -o " $2=[^ ]*" | head -1 | cut -d= -f2- || true; }
+grep -E '^run ' "$REC" | while read -r _ name rest; do
+    # The command is the free text after " cmd=", always last: fields are read only before it.
+    head="${rest%% cmd=*}"
+    scenario=$(field "$head" scenario)
+    [ -n "$scenario" ] || continue
+    run=$(field "$head" job); dir=$(field "$head" dir)
     # The latest merge of this run: a resubmission's line, else the original one.
-    last=$(grep -E "^(remerge $name |run $name )" "$REC" | grep -o 'merge=[0-9]*' | tail -1 | cut -d= -f2)
+    last=$(grep -E "^(remerge $name |run $name )" "$REC" | sed 's/ cmd=.*//' | grep -o ' merge=[0-9]*' | tail -1 | cut -d= -f2 || true)
     if [ -n "$last" ]; then
         case "$(state "$last")" in
             COMPLETED|PENDING|RUNNING) echo "skip $name: merge $last is $(state "$last")"; continue ;;

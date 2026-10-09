@@ -53,7 +53,7 @@ mp = ixmp.Platform()
 s = message_ix.Scenario(mp, "{model}", "{scen}")
 c = s.clone(keep_solution=False)
 c.check_out(); c.add_set("technology", ["t_new"]); c.commit("job change")
-c.set_as_default()
+{default}
 print("VERSION", c.version)
 mp.close_db()
 """
@@ -79,18 +79,37 @@ def test_full_chain(project, tmp_path):
 
     main = hd / "ixmp_live" / "mains" / "results"
     job = hd / "ixmp_live" / "jobs" / "j1"
-    for args in (["--kind", "main", "--job-dir", str(main)], ["--job-dir", str(job)]):
+    forgot = hd / "ixmp_live" / "jobs" / "j2"
+    for args in (["--kind", "main", "--job-dir", str(main)], ["--job-dir", str(job)], ["--job-dir", str(forgot)]):
         out = run_cli(["job-copy", "--seed", str(seed), "--area", "live", *args], root)
         assert out.returncode == 0, out.stderr
-    check = run_cli(["job-check", "--job-dir", str(job)], root, IXMP_DATA=str(job / "ixmp"))
-    assert check.returncode == 0, check.stderr
-    changed = py(CHANGE.format(model=MODEL, scen=SCEN), IXMP_DATA=str(job / "ixmp"))
-    job_version = int(changed.stdout.split("VERSION")[1].split()[0])
-    closed = run_cli(["job-close", "--job-dir", str(job)], root)
-    assert closed.returncode == 0, closed.stderr
+
+    def run_job(job_dir, default_line):
+        """What job_run.do does around a command: job-check, run-mark before and after, job-close."""
+        jenv = {"IXMP_DATA": str(job_dir / "ixmp"), **HEAP}
+        check = run_cli(["job-check", "--job-dir", str(job_dir)], root, **jenv)
+        assert check.returncode == 0, check.stderr
+        mark = ["run-mark", "--job-dir", str(job_dir), "--scenario", SCEN, "--model", MODEL]
+        assert run_cli([*mark, "--before"], root, **jenv).returncode == 0
+        changed = py(CHANGE.format(model=MODEL, scen=SCEN, default=default_line), IXMP_DATA=str(job_dir / "ixmp"))
+        after = run_cli([*mark, "--after"], root, **jenv)
+        assert run_cli(["job-close", "--job-dir", str(job_dir)], root).returncode == 0
+        return int(changed.stdout.split("VERSION")[1].split()[0]), after
+
+    job_version, after = run_job(job, "c.set_as_default()")
+    assert after.returncode == 0, after.stderr
+    _, forgotten = run_job(forgot, "")
+    assert forgotten.returncode == 3 and "set_as_default" in forgotten.stderr, forgotten.stderr[-500:]
+    assert json.loads((job / dbc.RUN_RESULT).read_text())["default"] == job_version
 
     menv = {"IXMP_DATA": str(main / "ixmp"), **HEAP}
-    merged = run_cli(["merge", "--job-dir", str(job), "--scenario", SCEN, "--model", MODEL, "--apply"], root, **menv)
+    stale = run_cli(["merge", "--job-dir", str(forgot), "--scenario", SCEN, "--model", MODEL, "--apply"], root, **menv)
+    assert stale.returncode == 3 and "set_as_default" in stale.stderr, stale.stderr[-500:]
+    unsolved = run_cli(["merge", "--job-dir", str(job), "--scenario", SCEN, "--model", MODEL, "--apply"], root, **menv)
+    assert unsolved.returncode == 3 and "no solution" in unsolved.stderr, unsolved.stderr[-500:]
+    assert not (hd / "ixmp_live" / "backups").exists()  # both refused before any backup
+    merged = run_cli(["merge", "--job-dir", str(job), "--scenario", SCEN, "--model", MODEL, "--allow-unsolved",
+                      "--apply"], root, **menv)
     assert merged.returncode == 0, merged.stdout[-2000:] + merged.stderr[-2000:]
     record = json.loads(next(cfg.records_dir.glob(f"merge_results_{SCEN}_v*.json")).read_text())
     assert record["source_version"] == job_version and record["set_default"] and record["compare"]["ok"]
@@ -104,8 +123,14 @@ print("DEFAULT", s.version, "t_new" in s.set("technology").tolist(), s.get_meta(
 mp.close_db()
 """, IXMP_DATA=str(main / "ixmp"))
     assert f"DEFAULT {record['merged_version']} True merged from {job.resolve()} v{job_version}" in after.stdout
-    again = run_cli(["merge", "--job-dir", str(job), "--scenario", SCEN, "--model", MODEL, "--apply"], root, **menv)
-    assert again.returncode == 3 and "already merged" in again.stderr, again.stderr[-1000:]
+    repeat = ["merge", "--job-dir", str(job), "--scenario", SCEN, "--model", MODEL, "--allow-unsolved", "--apply"]
+    again = run_cli(repeat, root, **menv)
+    assert again.returncode == 3 and "was merged into" in again.stderr, again.stderr[-1000:]  # by its record
+    record_path = next(cfg.records_dir.glob(f"merge_results_{SCEN}_v*.json"))
+    record_path.rename(record_path.with_suffix(".aside"))
+    again = run_cli(repeat, root, **menv)
+    assert again.returncode == 3 and "already merged" in again.stderr, again.stderr[-1000:]  # by the main itself
+    record_path.with_suffix(".aside").rename(record_path)
     assert dbc.verify(seed) == []
 
     # transfer: the original database to a fresh one; registry added, copy compared.

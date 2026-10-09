@@ -10,9 +10,14 @@ from __future__ import annotations
 
 import getpass
 import os
-import tomllib
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+if sys.version_info < (3, 11):  # tomllib; a cluster venv on an older Python fails here, clearly
+    raise SystemExit(f"ixmp-copies needs Python 3.11 or newer; this is {sys.version.split()[0]} "
+                     f"({sys.executable})")
+import tomllib  # noqa: E402
 
 FILENAME = "ixmp_copies.toml"
 ENV = "IXMP_COPIES_CONFIG"
@@ -32,6 +37,7 @@ class Config:
     backups: str
     areas: dict[str, str]
     ssh_host: str
+    cluster_user: str
     remote_hdrive: str
     lmod_init: str
     modules: tuple[str, ...]
@@ -53,9 +59,11 @@ class Config:
         return self.project_root / self.records
 
 
-def expand(template: str, **extra: str) -> str:
-    """`~` and `{user}` (the user running the tool on this machine), plus `extra` fields."""
-    return os.path.expanduser(template.format(user=getpass.getuser(), **extra))
+def expand(template: str, cluster_user: str = "", **extra: str) -> str:
+    """`~`, `{user}` (the account running the tool on this machine) and `{cluster_user}` (the
+    cluster account, e.g. the IIASA user; the local account when not configured), plus `extra`."""
+    local = getpass.getuser()
+    return os.path.expanduser(template.format(user=local, cluster_user=cluster_user or local, **extra))
 
 
 def find(start: Path | None = None) -> Path:
@@ -99,7 +107,8 @@ def parse(path: Path) -> Config:
         backups=_require(storage, "backups", "storage"),
         areas=dict(areas),
         ssh_host=cluster.get("ssh_host", "unicc"),
-        remote_hdrive=cluster.get("remote_hdrive", "/hdrive/all_users/{remote_user}"),
+        cluster_user=cluster.get("user", ""),
+        remote_hdrive=cluster.get("remote_hdrive", "/hdrive/all_users/{cluster_user}"),
         lmod_init=cluster.get("lmod_init", "/opt/apps/lmod/8.7/init/bash"),
         modules=tuple(cluster.get("modules", ())),
         gams_module=cluster.get("gams_module", ""),
@@ -119,7 +128,8 @@ def load(start: Path | None = None) -> Config:
 
 TEMPLATE = """\
 # ixmp-copies settings for this project. Paths below the storage roots are folders on the
-# shared H drive; `~` and `{{user}}` expand on the machine that runs the tool.
+# shared H drive. `~` expands on the machine that runs the tool, `{{cluster_user}}` to
+# [cluster] user, `{{user}}` to the local account.
 
 [project]
 platform = "{platform}"        # ixmp platform name of the working HyperSQL database
@@ -127,8 +137,10 @@ model = "{model}"              # default --model for merge and transfer ("" = al
 records = "ixmp_copies_records"  # backup/seed/merge records, relative to this file
 
 [storage]
-# The same share as seen from each machine; the first reachable one is used.
-roots = ["~/hdrive", "/hdrive/all_users/{{user}}"]
+# The same share as seen from each machine; the first reachable one is used. At IIASA the share
+# is /hdrive/all_users/<IIASA user> on the cluster; on a workstation, wherever it is mounted
+# (mounting it at that same path gives every path one spelling on both sides).
+roots = ["/hdrive/all_users/{{cluster_user}}", "~/hdrive"]
 backups = "ixmp_copies/{name}/backups"   # backups of databases outside every area
 
 [storage.areas]
@@ -137,7 +149,8 @@ live = "ixmp_copies/{name}/live"   # the project's runs
 
 [cluster]
 ssh_host = "unicc"                               # a Host in ~/.ssh/config (ControlMaster)
-remote_hdrive = "/hdrive/all_users/{{remote_user}}" # the H-drive root as the cluster sees it
+user = "{cluster_user}"                          # your cluster account (at IIASA: your IIASA user)
+remote_hdrive = "/hdrive/all_users/{{cluster_user}}" # the H-drive root as the cluster sees it
 lmod_init = "/opt/apps/lmod/8.7/init/bash"
 modules = ["Python/3.11.5-GCCcore-13.2.0", "Java"]
 gams_module = "gams/gams48.6_linux_x64_64_sfx"
@@ -154,5 +167,5 @@ marker_key = "ixmp_copies_merged_from"   # scenario meta that marks a merged ver
 """
 
 
-def template(name: str, platform: str, model: str, venv: str) -> str:
-    return TEMPLATE.format(name=name, platform=platform, model=model, venv=venv)
+def template(name: str, platform: str, model: str, venv: str, cluster_user: str) -> str:
+    return TEMPLATE.format(name=name, platform=platform, model=model, venv=venv, cluster_user=cluster_user)

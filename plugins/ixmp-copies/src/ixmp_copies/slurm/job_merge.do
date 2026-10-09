@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ixc_merge
 #SBATCH --time=01:00:00
-#SBATCH --partition=generic
 #SBATCH --mem=48G
 #SBATCH --cpus-per-task=2
 #SBATCH --output=%x_%j.out

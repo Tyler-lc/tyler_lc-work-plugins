@@ -48,18 +48,38 @@ def test_empty_log_is_closed(tmp_path):
     dbc.require_closed(d)
 
 
-def test_refused_while_held_open(tmp_path):
+def _hold(path: str, mode: str) -> subprocess.Popen:
+    holder = subprocess.Popen([sys.executable, "-c", f"f = open({path!r}, {mode!r}); import time; time.sleep(30)"])
+    time.sleep(1.0)
+    return holder
+
+
+def test_refused_while_held_open_for_writing(tmp_path):
     held = fake_db(tmp_path / "held")
-    holder = subprocess.Popen([sys.executable, "-c",
-                               f"f = open({str(held) + '.data'!r}, 'rb'); import time; time.sleep(30)"])
+    alias = tmp_path / "alias"
+    alias.symlink_to(held.parent)  # on UniCC ~/hdrive is such a symlink to /hdrive/...
+    holder = _hold(str(held) + ".data", "r+b")
     try:
-        time.sleep(1.0)
         with pytest.raises(Refused, match=str(holder.pid)):
             dbc.backup(held, tmp_path / "bk", "held")
+        with pytest.raises(Refused, match=str(holder.pid)):
+            dbc.require_closed(alias / "db")
     finally:
         holder.kill()
         holder.wait()
     dbc.require_closed(held)
+
+
+def test_readers_do_not_block_a_copy(tmp_path):
+    """Two jobs on one node copying the same read-only seed are each other's readers."""
+    held = fake_db(tmp_path / "read")
+    holder = _hold(str(held) + ".data", "rb")
+    try:
+        dbc.require_closed(held)
+        dbc.backup(held, tmp_path / "bk", "read")
+    finally:
+        holder.kill()
+        holder.wait()
 
 
 def test_refused_partial_exists(tmp_path):
@@ -124,8 +144,17 @@ def test_hdrive_unreachable(project, tmp_path):
     cfg, hd = project
     for p in hd.iterdir():
         p.unlink()
-    with pytest.raises(FileNotFoundError, match="no H drive"):
+    with pytest.raises(Refused, match="no H drive"):
         dbc.hdrive_root(cfg)
+
+
+def test_a_hung_mount_is_not_waited_for(tmp_path, monkeypatch):
+    real = subprocess.Popen
+    monkeypatch.setattr(dbc, "PROBE_SECONDS", 0.5)
+    monkeypatch.setattr(dbc.subprocess, "Popen", lambda *a, **k: real(["sleep", "30"]))
+    start = time.monotonic()
+    assert dbc.reachable(tmp_path) is False
+    assert time.monotonic() - start < 5
 
 
 def model_src(root: Path) -> Path:
