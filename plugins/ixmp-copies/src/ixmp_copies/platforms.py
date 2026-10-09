@@ -187,20 +187,22 @@ def default_version(mp, model: str, scenario: str) -> int:
 
 
 def merge_scenario(src_mp, dst_mp, model: str, scenario: str, version: int,
-                   marker: str, marker_key: str) -> dict:
+                   marker: str, marker_key: str, legacy: str | None = None) -> dict:
     """Bring one version from a job's database copy (`src_mp`) into a main platform
     (`dst_mp`) by cross-platform clone (default_version finds the job copy's default). The
     clone lands as the next version there; ixmp's clone never sets a default, so it is made
     default only when it was the default in the job copy and compare_copy passes. `marker`
     is stored as the new version's scenario meta `marker_key` right after the clone (the
     JDBC clone overwrites the annotation with its own, so the annotation cannot carry it). A
-    version on `dst_mp` already carrying the marker means this merge was made before:
+    version of this scenario on `dst_mp` already carrying the marker, or `legacy` (the marker
+    an earlier release wrote for the same merge), means this merge was made before:
     AlreadyMerged, rather than a duplicate."""
     import message_ix
 
     listed = versions(dst_mp, model, scenario, default=False)
+    seen = {marker, legacy} - {None}
     done = [int(v) for v in listed["version"]
-            if message_ix.Scenario(dst_mp, model, scenario, version=int(v)).get_meta().get(marker_key) == marker]
+            if message_ix.Scenario(dst_mp, model, scenario, version=int(v)).get_meta().get(marker_key) in seen]
     if done:
         raise AlreadyMerged(f"{model}/{scenario} already merged as version(s) {done}: {marker}")
     src_default = versions(src_mp, model, scenario, default=True)
@@ -215,6 +217,37 @@ def merge_scenario(src_mp, dst_mp, model: str, scenario: str, version: int,
     return {"model": model, "scenario": scenario, "source_version": version,
             "merged_version": int(copy.version), "was_default_in_job": was_default,
             "set_default": was_default and check["ok"], "marker": marker, "compare": check}
+
+
+def run_outcome(before: dict, after: dict) -> dict:
+    """Whether a run's command left a result a merge can bring back, from scenario_state before
+    and after it. Accepted: a default version that was not there before (the command cloned or
+    made a new version and set it as default), or the same default version, unsolved before and
+    solved after (solved in place). Not accepted: no default; an older version made default; the
+    same default, unsolved after (nothing solved); the same default, solved before and after,
+    since a re-solve in place cannot be told from a command that did nothing. Returns `after`
+    with the versions before, `new`, `in_place`, `accepted`, and `reason` when not accepted."""
+    default, label = after["default"], f"{after['model']}/{after['scenario']}"
+    new = default is not None and default not in before["versions"]
+    in_place = (not new and default is not None and default == before["default"]
+                and not before["solved"] and after["solved"])
+    reason = None
+    if default is None:
+        reason = f"{label} has no default version after the run: did its command create and set_as_default() it?"
+    elif not new and default != before["default"]:
+        reason = (f"the run made v{default} of {label} default, a version that was there before it (the "
+                  f"default was v{before['default']}): the merge brings back the run's own result")
+    elif not new and not in_place and not after["solved"]:
+        reason = (f"v{default} of {label} is still the default and still unsolved after the run: did its "
+                  "command solve the scenario, and call set_as_default() on what it solved?")
+    elif not new and not in_place:
+        reason = (f"v{default} of {label} was the default, and solved, before the run and still is: a "
+                  "re-solve in place cannot be told from a command that did nothing. Clone to a new "
+                  "version (or name) before solving and call set_as_default() on the clone, or start "
+                  "from a seed in which the scenario is unsolved")
+    return {**after, "before": before["versions"], "before_default": before["default"],
+            "before_solved": before["solved"], "new": new, "in_place": in_place,
+            "accepted": reason is None, "reason": reason}
 
 
 def scenario_state(mp, model: str, scenario: str) -> dict:

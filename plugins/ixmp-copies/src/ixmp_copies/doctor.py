@@ -6,6 +6,7 @@ the SSH connection and are skipped when it is not open.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -139,6 +140,9 @@ def _remote(cfg: Config) -> list[Check]:
     ok = ssh(f"test -d {shlex.quote(root)} && test -w {shlex.quote(root)}").returncode == 0
     out.append(Check("H drive on the cluster", "ok" if ok else "FAIL", root,
                      "fix [cluster] remote_hdrive: the same share as [storage] roots, as the cluster sees it"))
+    local = next((r for r in hdrive_candidates(cfg) if reachable(r)), None)
+    if ok and local is not None:
+        out.append(_same_share(local, root, ssh))
     # Jobs find the share through [storage] roots, expanded on the cluster: the first one there
     # that exists and holds something is the one they use.
     roots = [r.format(cluster_user=user, user=user) for r in cfg.roots]
@@ -190,7 +194,29 @@ def _remote(cfg: Config) -> list[Check]:
     sb = ssh("command -v sbatch", timeout=30)
     out.append(Check("sbatch on the login node", "ok" if sb.returncode == 0 else "FAIL",
                      sb.stdout.strip(), "the ssh host must be a SLURM login node"))
+    part = ssh(f"sinfo -h -p {shlex.quote(cfg.partition)} -o %P", timeout=30)
+    out.append(Check(f"partition {cfg.partition!r} on the cluster",
+                     "ok" if part.returncode == 0 and part.stdout.strip() else "FAIL",
+                     part.stdout.strip() or (part.stderr.strip()[-200:] or "sinfo lists no such partition"),
+                     "set [cluster] partition to one that `sinfo -s` lists on the login node"))
     return out
+
+
+def _same_share(local: Path, root: str, ssh) -> Check:
+    """Whether the share this machine reaches at `local` is the one the cluster has at `root`, by
+    the names at its top level (hidden ones aside: snapshot folders show on one side only)."""
+    name = "the same share here and on the cluster"
+    here = {n for n in os.listdir(local) if not n.startswith(".")}
+    listing = ssh(f"echo IXC_LS; ls -A {shlex.quote(root)}", timeout=60)
+    lines = listing.stdout.splitlines()
+    there = {n for n in lines[lines.index("IXC_LS") + 1:] if n and not n.startswith(".")} if "IXC_LS" in lines else set()
+    fix = "[storage] roots and [cluster] remote_hdrive must name one share, each as its machine sees it"
+    if here == there:
+        return Check(name, "ok", f"{len(here)} names at the top of {local} and of {root}")
+    differ = f"only here: {sorted(here - there)[:5]}; only there: {sorted(there - here)[:5]}"
+    if here & there:
+        return Check(name, "warn", f"{local} and {root} share {len(here & there)} top-level names, not all: {differ}")
+    return Check(name, "FAIL", f"{local} and {root} have no top-level name in common: {differ}", fix)
 
 
 def run(remote: bool = True) -> list[Check]:

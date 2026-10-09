@@ -13,7 +13,10 @@
 # job-close runs whatever CMD returned, so a solved copy is always recorded.
 # With MERGE_SCENARIO (submit_runs.sh sets it), the job records that scenario's versions before
 # CMD and the version CMD left as default after it (run-mark); the job fails, and its merge does
-# not run, when CMD left no new version as default. CMD must call set_as_default() on its result.
+# not run, unless CMD left a new version as default or solved the default version in place.
+# CMD must call set_as_default() on its result. MERGE_SCENARIO "-" declares a run that merges
+# nothing (a read job): cleanup may then delete its copy without a merge record.
+# code_files.json records the code copy as made, so cleanup can tell what CMD wrote into it.
 # Env: CODE, AREA, SEED, NAME (lower-case [a-z0-9_]), CMD; optional MERGE_SCENARIO, MODEL. Pass them through the environment
 # with --export=ALL: --export=CMD=... splits the value on commas.
 : "${CODE:?}" "${AREA:?}" "${SEED:?}" "${NAME:?}" "${CMD:?}"
@@ -24,8 +27,15 @@ JOB_DIR="$(ixc where --area "$AREA" jobs)/${NAME}_${SLURM_JOB_ID}"
 echo "run [$CMD] on a copy of $SEED in $JOB_DIR; code $CODE; $(hostname)"
 step ixc job-copy --seed "$SEED" --job-dir "$JOB_DIR" --area "$AREA" || exit 1
 # The scenario this run's merge brings back (submit_runs.sh sets it): cleanup needs its record.
-[ -n "${MERGE_SCENARIO:-}" ] && echo "$MERGE_SCENARIO" > "$JOB_DIR/expected_merges.txt"
+# Empty for a run declared to merge nothing; absent (no MERGE_SCENARIO: submitted by hand), cleanup
+# keeps the copy until a merge record or --discard says otherwise.
+case "${MERGE_SCENARIO:-}" in
+    "") ;;
+    -) : > "$JOB_DIR/expected_merges.txt"; MERGE_SCENARIO="" ;;
+    *) echo "$MERGE_SCENARIO" > "$JOB_DIR/expected_merges.txt" ;;
+esac
 step cp -r "$CODE" "$JOB_DIR/code" || exit 1
+step ixc code-files --job-dir "$JOB_DIR" || exit 1
 use_code "$JOB_DIR/code"
 mkdir -p "$JOB_DIR/tmp"
 export IXMP_DATA="$JOB_DIR/ixmp" IXC_JOB_DIR="$JOB_DIR" TMPDIR="$JOB_DIR/tmp"

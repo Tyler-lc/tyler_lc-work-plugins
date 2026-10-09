@@ -59,7 +59,9 @@ def test_init_template_parses_and_refuses_overwrite(tmp_path):
     again = run_cli(["init", "--venv", "v", "--cluster-user", "jdoe"], proj)
     assert again.returncode == 3 and "exists" in again.stderr
     novenv = run_cli(["init"], tmp_path)
-    assert novenv.returncode == 2 and "--venv" in novenv.stderr
+    assert novenv.returncode == 3 and "--venv" in novenv.stderr  # a command line refused, like any refusal
+    unknown = run_cli(["nonsense"], tmp_path)
+    assert unknown.returncode == 3 and "REFUSED" in unknown.stderr
 
 
 def test_init_asks_ssh_for_the_cluster_user(tmp_path):
@@ -233,6 +235,11 @@ def test_job_scripts_run_against_a_snapshot(project, tmp_path):
     job_dir = hd / "ixmp_test" / "jobs" / "probe_42"
     assert (job_dir / "result.json").is_file()
     assert (job_dir / "code" / "records" / "run_probe.json").is_file()
+    # The code copy as made is recorded; the job's own imports (bytecode) and its json record are
+    # no output, so nothing would keep it from cleanup.
+    assert (job_dir / dbc.CODE_FILES).is_file() and list((job_dir / "code").rglob("*.pyc"))
+    assert dbc.job_outputs(cfg, job_dir) == []
+    assert not (job_dir / dbc.EXPECTED_MERGES).exists()  # submitted by hand: not a read job
     got = stage.collect(cfg, hd / "ixmp_test")
     assert "run_probe.json" in got["copied"] and not got["conflicts"]
     again = stage.collect(cfg, hd / "ixmp_test")
@@ -244,6 +251,13 @@ def test_job_scripts_run_against_a_snapshot(project, tmp_path):
     bad = subprocess.run(["bash", str(code / ".ixmp_copies/slurm/job_run.do")], capture_output=True,
                          text=True, env=failing, cwd=tmp_path)
     assert bad.returncode != 0 and "Exit: run 7 mark 0 close 0 seed 0" in bad.stdout, bad.stdout[-1500:]
+    reader = {**env, "NAME": "reads", "SLURM_JOB_ID": "44", "MERGE_SCENARIO": "-", "CMD": "echo x > out.txt"}
+    read = subprocess.run(["bash", str(code / ".ixmp_copies/slurm/job_run.do")], capture_output=True,
+                          text=True, env=reader, cwd=tmp_path)
+    assert "Exit: run 0 mark 0 close 0 seed 0" in read.stdout, read.stdout[-1500:] + read.stderr[-1500:]
+    read_dir = hd / "ixmp_test" / "jobs" / "reads_44"
+    assert (read_dir / dbc.EXPECTED_MERGES).read_text() == "" and not (read_dir / dbc.RUN_BEFORE).exists()
+    assert dbc.job_outputs(cfg, read_dir) == ["code/out.txt"]  # written by the command into its code copy
 
 
 
@@ -255,6 +269,31 @@ def test_init_sanitises_the_folder_name(tmp_path):
     cfg = config.parse(proj / config.FILENAME)
     assert cfg.platform == "4th-gen-paper-local" and cfg.areas["test"] == "ixmp_copies/4th_gen_paper/test"
     assert "platform-add" in out.stdout
+
+
+@needs_ixmp
+def test_transfer_into_a_platform_not_opened_yet(project, tmp_path):
+    """platform-add, then transfer (SETUP.md steps 6 and 7): the database files do not exist until the
+    first open, so there is nothing to back up or to find open."""
+    cfg, _ = project
+    home = tmp_path / "ixmp_home"
+    home.mkdir()
+    (home / "config.json").write_text(json.dumps({"platform": {"default": "ixmp-dev", "ixmp-dev": {
+        "class": "jdbc", "driver": "oracle", "url": "x", "user": "u", "password": "p"}}}))
+    env = {"IXMP_DATA": str(home)}
+    added = run_cli(["platform-add", "--dir", str(tmp_path / "localdb"), "--apply"], cfg.project_root, **env)
+    assert added.returncode == 0, added.stderr
+    tr = run_cli(["transfer", "--from", "ixmp-dev", "--to", cfg.platform, "--scenario", "s"], cfg.project_root, **env)
+    assert tr.returncode == 0 and "a new database, nothing to back up" in tr.stdout, tr.stdout + tr.stderr
+    fake_db(tmp_path / "other")  # files beside the stem: an existing database, checked and backed up
+    conf = json.loads((home / "config.json").read_text())
+    conf["platform"]["proj-local"]["url"] = f"jdbc:hsqldb:file:{tmp_path / 'other' / 'db'}"
+    (home / "config.json").write_text(json.dumps(conf))
+    existing = run_cli(["transfer", "--from", "ixmp-dev", "--to", cfg.platform, "--scenario", "s"], cfg.project_root, **env)
+    assert existing.returncode == 0 and "backed up first" in existing.stdout, existing.stdout + existing.stderr
+    Path(f"{tmp_path / 'other' / 'db'}.lck").write_text("x")
+    held = run_cli(["transfer", "--from", "ixmp-dev", "--to", cfg.platform, "--scenario", "s"], cfg.project_root, **env)
+    assert held.returncode == 3 and "not closed" in held.stderr
 
 
 @needs_ixmp

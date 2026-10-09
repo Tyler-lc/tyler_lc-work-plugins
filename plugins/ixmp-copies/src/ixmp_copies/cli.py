@@ -28,13 +28,18 @@ On the workstation:
                                         records, which only grow, are updated)
     cleanup --area A --main NAME [--include-outputs] [--apply]
                                         delete the job copies whose every expected scenario a
-                                        merge record shows merged into <area>/mains/NAME and
-                                        whose records are collected; keep the rest
+                                        merge record shows merged into <area>/mains/NAME (or
+                                        that were meant to merge nothing), whose records are
+                                        collected and that hold no output a run wrote (files in
+                                        the job folder, new or changed files in its code copy,
+                                        GDX files and listings in its model folder); keep the rest
+    cleanup --area A --discard JOB --reason TEXT [--include-outputs] [--apply]
+                                        delete one closed job copy whatever its merges
     transfer --from P1 --to P2 --scenario S [--model M] [--version V] [--apply]
                                         copy one scenario across platforms (e.g. ixmp-dev to a
                                         local database, and back), adding the units, regions
                                         and time slices the target lacks; backs up a HyperSQL
-                                        target first
+                                        target first (unless its database does not exist yet)
 Anywhere:
     seed (--from BACKUP | --from-job DIR) --area A --name N [--apply]
                                         read-only seed <area>/seeds/N/ (make it on the cluster:
@@ -43,11 +48,13 @@ Anywhere:
 Inside a job (see the SLURM templates):
     job-copy --seed S --job-dir DIR --area A [--platform P] [--kind job|main]
     job-check --job-dir DIR [--platform P]
+    code-files --job-dir DIR            record the files of the job's fresh code copy
     job-close --job-dir DIR
     run-mark --job-dir DIR --scenario S (--before | --after) [--model M]
                                         record S's versions before the run's command, and the
-                                        version it left as default after it (refused when that
-                                        is no new version: the command forgot set_as_default())
+                                        version it left as default after it; refused unless
+                                        that is a new version, or the default solved in place
+                                        (unsolved before, solved after)
     merge --job-dir DIR --scenario S [--version N | --version default] [--allow-unsolved]
           [--model M] [--into P] [--apply]
                                         the version is the one the run recorded (run-mark);
@@ -57,7 +64,7 @@ P defaults to [project] platform, M to [project] model. Without --apply, backup,
 seed, merge and transfer only run their checks.
 
 Exit codes: 0 done; 3 refused, nothing changed (also: no H drive, an unknown platform, no
-config); 2 a copy does not match its source, verify found a difference, a comparison after a
+config, a command line the tool does not accept); 2 a copy does not match its source, verify found a difference, a comparison after a
 merge or transfer failed, or collect met a record it will not overwrite; 4 a merge or transfer
 failed after its backup, or left its target not shut down cleanly (the message names the backup
 to restore from); 1 a failed doctor check, or Python's own code for an uncaught error (a bug or
@@ -83,6 +90,15 @@ from ixmp_copies.platforms import AlreadyMerged, PlatformError
 
 class OperationFailed(RuntimeError):
     """A merge or transfer failed after its backup was taken, or left its target not closed."""
+
+
+class _Parser(argparse.ArgumentParser):
+    """argparse exits 2 on a bad command line, the code this tool gives a mismatch; a command
+    line it does not accept is a refusal: nothing ran."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(3, f"REFUSED: {message}\n")
 
 
 def _version(text: str):
@@ -269,11 +285,16 @@ def cmd_collect(args) -> int:
 
 def cmd_cleanup(args) -> int:
     cfg = config_mod.load()
+    if args.discard:
+        return _discard(cfg, args)
+    if not args.main:
+        raise Refused("pass --main NAME (the results main the jobs merged into), or --discard JOB")
     plan = copies.cleanup_plan(cfg, args.area, args.main, include_outputs=args.include_outputs)
     for job, reason in plan["keep"]:
         print(f"keep    {job.name}: {reason}")
     for job, records in plan["delete"]:
-        print(f"delete  {job.name}: merged ({len(records)} record{'s' if len(records) > 1 else ''})")
+        print(f"delete  {job.name}: " + (f"merged ({len(records)} record{'s' if len(records) > 1 else ''})"
+                                         if records else "meant to merge nothing"))
     if not args.apply:
         print(f"dry run: {len(plan['delete'])} job copies would be deleted; pass --apply")
         return 0
@@ -282,6 +303,23 @@ def cmd_cleanup(args) -> int:
                      {"deleted": {str(j): r for j, r in plan["delete"]},
                       "kept": {str(j): why for j, why in plan["keep"]}})
     print(f"deleted {len(deleted)} job copies; record {record}")
+    return 0
+
+
+def _discard(cfg, args) -> int:
+    if args.main:
+        raise Refused("--discard deletes one job copy whatever its merges: pass it without --main")
+    if not (args.reason or "").strip():
+        raise Refused("--discard needs --reason TEXT: the cleanup record keeps why the copy was deleted")
+    job = copies.discard_check(cfg, args.area, args.discard, include_outputs=args.include_outputs)
+    print(f"discard {job.name}: {args.reason}")
+    if not args.apply:
+        print("dry run: nothing deleted; pass --apply")
+        return 0
+    copies.cleanup_apply({"delete": [(job, [])]})
+    record = _record(cfg, f"cleanup_{args.area}_discard_{job.name}_{time.strftime('%Y%m%d_%H%M%S')}",
+                     {"discarded": str(job), "reason": args.reason, "include_outputs": args.include_outputs})
+    print(f"deleted {job}; record {record}")
     return 0
 
 
@@ -331,6 +369,12 @@ def cmd_job_check(args) -> int:
     return 0
 
 
+def cmd_code_files(args) -> int:
+    n = copies.record_code_files(Path(args.job_dir))
+    print(f"{args.job_dir}: {n} files of the code copy recorded in {copies.CODE_FILES}")
+    return 0
+
+
 def cmd_job_close(args) -> int:
     result = copies.job_close(Path(args.job_dir))
     print(f"{args.job_dir}: closed; {len(result['files'])} files recorded in result.json")
@@ -360,10 +404,10 @@ def _guarded(what: str, backup_dir: Path | None, target: str, fn):
 
 def cmd_run_mark(args) -> int:
     """Inside a run job: record the scenario's versions before the command, and after it the
-    version the command left as default; refuse (exit 3) when that is not a new version."""
+    version the command left as default; refuse (exit 3) unless run_outcome accepts it."""
     import ixmp
 
-    from ixmp_copies.platforms import scenario_state
+    from ixmp_copies.platforms import run_outcome, scenario_state
 
     cfg = config_mod.load()
     model = _model(cfg, args)
@@ -385,28 +429,28 @@ def cmd_run_mark(args) -> int:
     before = json.loads(before_file.read_text())
     if before["scenario"] != args.scenario or before["model"] != model:
         raise Refused(f"{before_file} is about {before['model']}/{before['scenario']}")
-    result = {**state, "before": before["versions"],
-              "new": state["default"] is not None and state["default"] not in before["versions"]}
+    result = run_outcome(before, state)
     copies.write_new(job_dir / copies.RUN_RESULT, json.dumps(result, indent=2))
-    if not result["new"]:
-        raise Refused(f"the run left no new version of {model}/{args.scenario} as default (default "
-                      f"{state['default']}, versions before the run {before['versions']}): did its command "
-                      "call set_as_default()? Its merge will refuse")
-    print(f"the run left v{state['default']} as default (solved: {state['solved']})")
+    if not result["accepted"]:
+        raise Refused(f"{result['reason']} (versions before the run {before['versions']}). Its merge will refuse")
+    how = "solved in place" if result["in_place"] else "a new version"
+    print(f"the run left v{state['default']} as default ({how}; solved: {state['solved']})")
     return 0
 
 
-def _merge_version(job_dir: Path, scenario: str, requested, allow_unsolved: bool):
+def _merge_version(job_dir: Path, model: str, scenario: str, requested, allow_unsolved: bool):
     """The version a merge brings back, and the run's own record of it when there is one."""
     result_file = job_dir / copies.RUN_RESULT
     if result_file.exists():
         run = json.loads(result_file.read_text())
-        if run["scenario"] != scenario:
-            raise Refused(f"{job_dir}'s run was about {run['scenario']}, not {scenario}")
-        if not run["new"]:
-            raise Refused(f"the run left no new version of {scenario} as default (default {run['default']}, "
-                          f"versions before it {run['before']}): did its command call set_as_default()? "
-                          "Nothing merged")
+        if (run["model"], run["scenario"]) != (model, scenario):
+            raise Refused(f"{job_dir}'s run was about {run['model']}/{run['scenario']}, not {model}/{scenario} "
+                          "(pass the run's --model and --scenario)")
+        # Records of 0.3.0 carry only `new`, which was then the whole test.
+        if not run.get("accepted", run["new"]):
+            raise Refused(run.get("reason") or f"the run left no new version of {scenario} as default (default "
+                          f"{run['default']}, versions before it {run['before']}): did its command call "
+                          "set_as_default()?")
         if requested not in (None, "default") and requested != run["default"]:
             raise Refused(f"--version {requested} is not the version the run left as default ({run['default']})")
         if not run["solved"] and not allow_unsolved:
@@ -427,17 +471,27 @@ def cmd_merge(args) -> int:
     model, into = _model(cfg, args), args.into or cfg.platform
     job_dir = Path(args.job_dir).resolve()
     copies.require_job_result(job_dir)
-    version, run = _merge_version(job_dir, args.scenario, args.version, args.allow_unsolved)
+    version, run = _merge_version(job_dir, model, args.scenario, args.version, args.allow_unsolved)
     seed_file = job_dir / copies.SEED_MERGE
-    # A seed merge is marked by its seed, which is the same in every resubmission; a run's
-    # merge by the job that ran it.
-    source = Path(seed_file.read_text().strip()).resolve() if seed_file.exists() else job_dir
+    # A run's merge is marked by the job that ran it. A seed merge is marked by the database the
+    # seed's versions came from, the same in every resubmission and through every newer seed of
+    # it; 0.3.0 marked it by the seed folder.
+    if seed_file.exists():
+        seed = Path(seed_file.read_text().strip()).resolve()
+        source, old_source = copies.seed_origin(seed), str(seed)
+    else:
+        source = old_source = str(job_dir)
     dst = platform_db(into)
     copies.require_closed(dst)
     label = copies.copy_label(dst, into, cfg)
     backups = copies.backup_root_for(dst, cfg)
+
+    def markers(v: int) -> tuple[str, str]:
+        return copies.merge_marker(source, model, args.scenario, v), copies.legacy_marker(old_source, v)
+
     if version != "default":
-        earlier = copies.find_merge_record(cfg, dst, f"merged from {source} v{version}")
+        marker, legacy = markers(version)
+        earlier = copies.find_merge_record(cfg, dst, marker, model, args.scenario, legacy=legacy)
         if earlier:
             raise Refused(f"{model}/{args.scenario} v{version} from {source} was merged into {into} before: {earlier}")
     print(f"{model}/{args.scenario} v{version} from {job_dir} -> {into} ({dst}); "
@@ -454,11 +508,11 @@ def cmd_merge(args) -> int:
     try:
         if version == "default":
             version = _default(default_version, src_mp, model, args.scenario)
-        marker = f"merged from {source} v{version}"
+        marker, legacy = markers(version)
         dst_mp = ixmp.Platform(into)
         try:
             out = _guarded("MERGE", backup_dir, f"{into} ({dst})", lambda: merge_scenario(
-                src_mp, dst_mp, model, args.scenario, version, marker, cfg.marker_key))
+                src_mp, dst_mp, model, args.scenario, version, marker, cfg.marker_key, legacy))
         except AlreadyMerged as err:
             raise Refused(str(err)) from err
         finally:
@@ -497,15 +551,19 @@ def cmd_transfer(args) -> int:
     cfg = config_mod.load()
     model = _model(cfg, args)
     dst_db = platform_db(args.to) if is_hsqldb(args.to) else None
-    if dst_db is not None:
+    # A platform registered but never opened (platform-add) has no database files yet: nothing
+    # to back up or to find open; HyperSQL creates the database on the transfer's first open.
+    fresh = dst_db is not None and not any(dst_db.parent.glob(f"{dst_db.name}.*"))
+    if dst_db is not None and not fresh:
         copies.require_closed(dst_db)
     print(f"{model}/{args.scenario} v{args.version or 'default'}: {args.source} -> {args.to}"
-          + (f" ({dst_db}; backed up first)" if dst_db else " (not HyperSQL: no backup possible)"))
+          + (" (not HyperSQL: no backup possible)" if dst_db is None
+             else f" ({dst_db}: a new database, nothing to back up)" if fresh else f" ({dst_db}; backed up first)"))
     if not args.apply:
         print("dry run: nothing opened; pass --apply")
         return 0
     backup_dir = None
-    if dst_db is not None:
+    if dst_db is not None and not fresh:
         backup_dir, _ = copies.backup(dst_db, copies.backup_root_for(dst_db, cfg),
                                       copies.copy_label(dst_db, args.to, cfg))
     src_mp = ixmp.Platform(args.source)
@@ -528,7 +586,8 @@ def cmd_transfer(args) -> int:
     finally:
         src_mp.close_db()
     out.update({"model": model, "scenario": args.scenario, "source": args.source,
-                "source_version": version, "to": args.to, "pre_transfer_backup": str(backup_dir)})
+                "source_version": version, "to": args.to,
+                "pre_transfer_backup": str(backup_dir) if backup_dir else None})
     record = _record(cfg, f"transfer_{args.to}_{args.scenario}_v{version}_{time.strftime('%Y%m%d_%H%M%S')}", out)
     print(json.dumps(out, indent=2, default=str))
     print(f"record {record}")
@@ -536,8 +595,7 @@ def cmd_transfer(args) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="ixmp-copies", description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = _Parser(prog="ixmp-copies", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add(command, func, *flags, **opts):
@@ -570,11 +628,14 @@ def parser() -> argparse.ArgumentParser:
     add("stage", cmd_stage, "--area", extra={"action": "append", "default": [],
                                              "help": "PATH, or CHECKOUT:PATH for an untracked file"})
     add("collect", cmd_collect, "--area")
-    add("cleanup", cmd_cleanup, "--area", "--main", apply=apply,
-        include_outputs={"action": "store_true", "help": "also delete jobs holding files a run wrote"})
+    add("cleanup", cmd_cleanup, "--area", main={"help": "the results main the jobs merged into"}, apply=apply,
+        include_outputs={"action": "store_true", "help": "also delete jobs holding files a run wrote"},
+        discard={"help": "one job copy (its folder name) to delete whatever its merges"},
+        reason={"help": "why the --discard copy is not needed (kept in the cleanup record)"})
     add("job-copy", cmd_job_copy, "--seed", "--job-dir", "--area", platform={},
         kind={"choices": ("job", "main"), "default": "job"})
     add("job-check", cmd_job_check, "--job-dir", platform={})
+    add("code-files", cmd_code_files, "--job-dir")
     add("job-close", cmd_job_close, "--job-dir")
     rm = add("run-mark", cmd_run_mark, "--job-dir", "--scenario", model={})
     when = rm.add_mutually_exclusive_group(required=True)

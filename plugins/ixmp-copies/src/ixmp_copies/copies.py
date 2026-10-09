@@ -19,6 +19,7 @@ maps them to distinct exit codes.
 
 from __future__ import annotations
 
+import fnmatch
 import getpass
 import hashlib
 import json
@@ -52,14 +53,21 @@ EXPECTED_MERGES = "expected_merges.txt"
 RUN_BEFORE = "run_before.json"
 RUN_RESULT = "run_result.json"
 # A job copy made only to merge scenarios from a seed names that seed here; its merges are
-# marked by the seed, so resubmitting them cannot land a scenario twice.
+# marked by the database the seed's versions came from, so resubmitting them, or merging the
+# same version through a newer seed, cannot land a scenario twice.
 SEED_MERGE = "seed_merge.txt"
+# Size and SHA-256 of every file of a run job's code copy, taken right after the copy: what the
+# run wrote there later (new or changed files) is output that cleanup must not delete unseen.
+CODE_FILES = "code_files.json"
 # What a job folder holds besides output a run wrote into it.
 JOB_PARTS = {"db", "model", "ixmp", "code", "tmp", "result.json", "model_source.json", EXPECTED_MERGES,
-             RUN_BEFORE, RUN_RESULT, SEED_MERGE}
+             RUN_BEFORE, RUN_RESULT, SEED_MERGE, CODE_FILES}
 # GAMS scratch folders (225a, 225b, ...), listings, logs and GDX files are run output, not
 # model source; a job's model folder starts without them.
 MODEL_IGNORE = shutil.ignore_patterns("225*", "*.lst", "*.log", "*.gdx", "*.~*")
+# What a solve leaves in a job's model folder that may be the only copy of something: GDX files
+# (model/data, and model/output, which holds the equation duals), listings and GAMS scratch.
+MODEL_OUTPUTS = ("*.gdx", "*.lst", "225*")
 
 
 class Refused(RuntimeError):
@@ -372,25 +380,29 @@ def _seedable(db: Path, origin: Path) -> None:
 
 def seed(backup_folder: Path, area: str, name: str, cfg: Config,
          root: Path | None = None) -> tuple[Path, dict, bool]:
-    """A read-only seed <area>/seeds/<name>/ from a verified backup with CACHED tables.
+    """A read-only seed <area>/seeds/<name>/ from a verified backup with CACHED tables. Its
+    manifest's `origin` is the database that was backed up: where the seed's versions come from.
     Returns its folder, manifest and whether read-only took."""
     source = require_verified(backup_folder, "backup")
     db = backup_folder / Path(source["source"]).name
     _seedable(db, backup_folder)
     dest = area_root(area, cfg, root) / "seeds" / require_name(name)
-    manifest = checked_copy(db, dest, {"kind": "seed", "name": name, "from_backup": str(backup_folder)})
+    manifest = checked_copy(db, dest, {"kind": "seed", "name": name, "from_backup": str(backup_folder),
+                                       "origin": source["source"]})
     return dest, manifest, make_read_only(dest)
 
 
 def seed_from_job(job_dir: Path, area: str, name: str, cfg: Config,
                   root: Path | None = None) -> tuple[Path, dict, bool]:
     """A read-only seed <area>/seeds/<name>/ from a job copy the job closed (job-close), e.g.
-    a solved scenario that later runs start from. Returns folder, manifest, read-only."""
+    a solved scenario that later runs start from; its `origin` is the job folder. Returns
+    folder, manifest, read-only."""
     require_job_result(job_dir)
     db = job_dir / "db" / STEM
     _seedable(db, job_dir)
     dest = area_root(area, cfg, root) / "seeds" / require_name(name)
-    manifest = checked_copy(db, dest, {"kind": "seed", "name": name, "from_job": str(job_dir)})
+    manifest = checked_copy(db, dest, {"kind": "seed", "name": name, "from_job": str(job_dir),
+                                       "origin": str(job_dir.resolve())})
     return dest, manifest, make_read_only(dest)
 
 
@@ -476,6 +488,52 @@ def job_close(job_dir: Path) -> dict:
     return result
 
 
+def code_files(code_dir: Path) -> dict[str, dict]:
+    """Size and SHA-256 of every file below `code_dir`, by path relative to it; Python's bytecode
+    caches excepted, which every import in a job writes there."""
+    return {str(p.relative_to(code_dir)): {"size": p.stat().st_size, "sha256": digest(p)}
+            for p in sorted(code_dir.rglob("*"))
+            if p.is_file() and not p.is_symlink() and "__pycache__" not in p.relative_to(code_dir).parts}
+
+
+def record_code_files(job_dir: Path) -> int:
+    """Write <job>/code_files.json for the job's fresh code copy; returns the file count."""
+    code = job_dir / "code"
+    if not code.is_dir():
+        raise Refused(f"{code} does not exist: copy the code into the job folder first")
+    files = code_files(code)
+    write_new(job_dir / CODE_FILES, json.dumps(files, indent=2))
+    return len(files)
+
+
+def seed_origin(seed_folder: Path) -> str:
+    """The database a seed's versions came from, which marks merges from it: the manifest's
+    `origin`; for a seed made before it was recorded, the source of the backup it was made from,
+    or the job folder; else the seed folder itself."""
+    manifest = json.loads((seed_folder / MANIFEST).read_text())
+    if manifest.get("origin"):
+        return manifest["origin"]
+    if manifest.get("from_backup"):
+        backup_manifest = Path(manifest["from_backup"]) / MANIFEST
+        if backup_manifest.is_file():
+            return json.loads(backup_manifest.read_text())["source"]
+    if manifest.get("from_job"):
+        return str(Path(manifest["from_job"]).resolve())
+    return str(seed_folder.resolve())
+
+
+def merge_marker(source: str, model: str, scenario: str, version: int) -> str:
+    """What marks a merged version (scenario meta and merge record): the database it came from
+    and which version of what it was there."""
+    return f"merged from {source} {model}/{scenario} v{version}"
+
+
+def legacy_marker(source: str, version: int) -> str:
+    """The marker of 0.3.0 and before, which named no model or scenario. Read only together with
+    the scenario: on the target's versions of that scenario, or a record about it."""
+    return f"merged from {source} v{version}"
+
+
 def cluster_spelling(path: Path, cfg: Config) -> str | None:
     """`path` (on the share, as this machine sees it) as the cluster spells it: what a job
     script's BACKUP=, SEED= or MAIN= needs. None for a path that is not on the share."""
@@ -492,14 +550,18 @@ def area_of(path: Path, cfg: Config) -> str | None:
     return next((a for a, folder in cfg.areas.items() if within_area(str(path), folder) is not None), None)
 
 
-def find_merge_record(cfg: Config, into_db: Path, marker: str) -> str | None:
-    """The path of a passing merge record with `marker` into the database `into_db`, if one exists.
-    Lets a merge refuse an obvious repeat before it backs the target up; the target's own
-    scenario meta stays the final word."""
+def find_merge_record(cfg: Config, into_db: Path, marker: str, model: str, scenario: str,
+                      legacy: str | None = None) -> str | None:
+    """The path of a passing merge record of `model`/`scenario` with `marker` (or, for records
+    written before markers named the scenario, `legacy`) into the database `into_db`, if one
+    exists. Lets a merge refuse an obvious repeat before it backs the target up; the target's
+    own scenario meta stays the final word."""
     area = area_of(into_db, cfg)
     area_dir = area_root(area, cfg) if area else cfg.records_dir / "_none"
     for record in merge_records(cfg, area_dir):
-        if record.get("marker") != marker or not record.get("compare", {}).get("ok"):
+        if record.get("marker") not in {marker, legacy} - {None} or not record.get("compare", {}).get("ok"):
+            continue
+        if record.get("model") != model or record.get("scenario") != scenario:
             continue
         same = (within_area(record.get("into_db", ""), cfg.areas[area]) == within_area(str(into_db), cfg.areas[area])
                 if area else Path(record.get("into_db", "")).resolve() == into_db.resolve())
@@ -542,14 +604,66 @@ def uncollected_records(cfg: Config, job: Path) -> list[str]:
     return missing
 
 
+def job_outputs(cfg: Config, job: Path) -> list[str]:
+    """What a run wrote into the job folder that may exist nowhere else, relative to it: files
+    beside the job's own parts; new or changed files in its code copy (against code_files.json;
+    the json records in the records folder excepted, which `collect` brings home and
+    uncollected_records checks); GDX files, listings and GAMS scratch in its model folder. A
+    code copy without code_files.json cannot be told apart from the staged code, so it counts."""
+    out = sorted(p.name for p in job.iterdir() if p.name not in JOB_PARTS and not p.name.startswith("merge_src_"))
+    code = job / "code"
+    if code.is_dir():
+        recorded = job / CODE_FILES
+        if not recorded.exists():
+            out.append(f"code/ (no {CODE_FILES}: what the run wrote there cannot be told from the staged code)")
+        else:
+            staged = json.loads(recorded.read_text())
+            for rel, meta in code_files(code).items():
+                path = Path(rel)
+                if path.parent == Path(cfg.records) and path.suffix == ".json":
+                    continue
+                if staged.get(rel) != meta:
+                    out.append(f"code/{rel}")
+    model = job / "model"
+    if model.is_dir():
+        out += sorted(f"model/{p.relative_to(model)}" for p in model.rglob("*")
+                      if p.is_file() and any(fnmatch.fnmatch(part, pat)
+                                             for part in p.relative_to(model).parts for pat in MODEL_OUTPUTS))
+    return out
+
+
+def _listed(names: list[str], most: int = 5) -> str:
+    return str(names) if len(names) <= most else f"{names[:most]} and {len(names) - most} more"
+
+
+def _deletable(cfg: Config, job: Path, include_outputs: bool) -> str | None:
+    """Why the closed job copy `job` must be kept whatever its merges, or None."""
+    if not (job / "result.json").exists():
+        return "not closed (running, failed or cancelled)"
+    try:
+        require_closed(job / "db" / STEM)
+    except Refused as err:
+        return f"database not closed: {err}"
+    outputs = job_outputs(cfg, job)
+    if outputs and not include_outputs:
+        return (f"holds files a run wrote: {_listed(outputs)} (copy out what is needed, GDX in model/output "
+                "included, then pass --include-outputs)")
+    uncollected = uncollected_records(cfg, job)
+    if uncollected:
+        return f"records not collected yet: {uncollected} (ixmp-copies collect)"
+    return None
+
+
 def cleanup_plan(cfg: Config, area: str, main: str, root: Path | None = None,
                  include_outputs: bool = False) -> dict[str, list]:
     """Which job copies below <area>/jobs/ may be deleted: those whose job closed them, whose
-    own records are collected, which hold no other output a run wrote into the job folder
-    (unless `include_outputs`), and for which merge records show every scenario the job was
-    meant to merge merged into <area>/mains/<main> with its comparison passing. Everything else
-    is kept, with the reason. The evidence is the merge record (written only after a merge's
-    clone and comparison), not a read of the main, which would need a JVM and the main closed."""
+    own records are collected, which hold no output a run wrote (job_outputs; unless
+    `include_outputs`), and for which merge records show every scenario the job was meant to
+    merge merged into <area>/mains/<main> with its comparison passing; or, for a job that was
+    meant to merge nothing (an empty expected_merges.txt: a run submitted with scenario `-`),
+    no merge record at all. Everything else is kept, with the reason. The evidence is the merge
+    record (written only after a merge's clone and comparison), not a read of the main, which
+    would need a JVM and the main closed."""
     area_dir = area_root(area, cfg, root)
     main_db = area_dir / COPY_KINDS["main"] / require_name(main) / "db" / STEM
     if not Path(f"{main_db}.properties").exists():
@@ -563,23 +677,9 @@ def cleanup_plan(cfg: Config, area: str, main: str, root: Path | None = None,
     plan: dict[str, list] = {"delete": [], "keep": []}
     jobs = area_dir / COPY_KINDS["job"]
     for job in sorted(p for p in jobs.iterdir() if p.is_dir()) if jobs.is_dir() else []:
-        if not (job / "result.json").exists():
-            plan["keep"].append((job, "not closed (running, failed or cancelled)"))
-            continue
-        try:
-            require_closed(job / "db" / STEM)
-        except Refused as err:
-            plan["keep"].append((job, f"database not closed: {err}"))
-            continue
-        outputs = sorted(p.name for p in job.iterdir()
-                         if p.name not in JOB_PARTS and not p.name.startswith("merge_src_"))
-        if outputs and not include_outputs:
-            plan["keep"].append((job, f"holds files a run wrote into the job folder: {outputs} "
-                                      "(copy them out, then pass --include-outputs)"))
-            continue
-        uncollected = uncollected_records(cfg, job)
-        if uncollected:
-            plan["keep"].append((job, f"records not collected yet: {uncollected} (ixmp-copies collect)"))
+        why = _deletable(cfg, job, include_outputs)
+        if why:
+            plan["keep"].append((job, why))
             continue
         records = by_job.get(f"{COPY_KINDS['job']}/{job.name}", [])
         good = [r for r in records if within_area(r.get("into_db", ""), cfg.areas[area]) == main_rel
@@ -588,7 +688,9 @@ def cleanup_plan(cfg: Config, area: str, main: str, root: Path | None = None,
         expected_file = job / EXPECTED_MERGES
         expected = set(expected_file.read_text().split()) if expected_file.exists() else set()
         missing = sorted(expected - {r["scenario"] for r in good})
-        if not records:
+        if not records and expected_file.exists() and not expected:
+            plan["delete"].append((job, []))  # a run meant to merge nothing (a read job)
+        elif not records:
             plan["keep"].append((job, f"no merge record into {main}"))
         elif bad:
             plan["keep"].append((job, f"a merge went elsewhere or its comparison failed: {bad}"))
@@ -597,6 +699,21 @@ def cleanup_plan(cfg: Config, area: str, main: str, root: Path | None = None,
         else:
             plan["delete"].append((job, [r["_path"] for r in good]))
     return plan
+
+
+def discard_check(cfg: Config, area: str, name: str, root: Path | None = None,
+                  include_outputs: bool = False) -> Path:
+    """The job copy <area>/jobs/<name>, refusing unless it may be deleted whatever its merges:
+    closed by its job, its database closed, its records collected, and no output a run wrote
+    (unless `include_outputs`). For a copy the user decided is not needed (a failed run, a
+    merge that will never be made)."""
+    job = area_root(area, cfg, root) / COPY_KINDS["job"] / require_name(name)
+    if not job.is_dir():
+        raise Refused(f"no job copy {job}")
+    why = _deletable(cfg, job, include_outputs)
+    if why:
+        raise Refused(f"{job}: {why}")
+    return job
 
 
 def cleanup_apply(plan: dict[str, list]) -> list[str]:

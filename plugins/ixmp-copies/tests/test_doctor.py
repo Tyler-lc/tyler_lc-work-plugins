@@ -19,6 +19,11 @@ while [ $# -gt 0 ]; do case "$1" in -o) shift 2 ;; -*) shift ;; *) break ;; esac
 shift  # the host
 exec bash -c "$*"
 """
+# The cluster has the partitions generic and short ("*" marks the default, as sinfo prints it).
+FAKE_SINFO = """#!/bin/bash
+while [ $# -gt 0 ]; do [ "$1" = -p ] && p=$2; shift; done
+case "$p" in generic) echo "generic*" ;; short) echo short ;; esac
+"""
 
 
 def _doctor(project, tmp_path, edit=lambda text: text, venv=None):
@@ -35,7 +40,7 @@ def _doctor(project, tmp_path, edit=lambda text: text, venv=None):
         "class": "jdbc", "driver": "hsqldb", "url": f"jdbc:hsqldb:file:{db};hsqldb.default_table_type=cached"}}}))
     fake = tmp_path / "fakebin"
     fake.mkdir(exist_ok=True)
-    for name, body in (("ssh", FAKE_SSH), ("sbatch", "#!/bin/sh\nexit 0\n")):
+    for name, body in (("ssh", FAKE_SSH), ("sbatch", "#!/bin/sh\nexit 0\n"), ("sinfo", FAKE_SINFO)):
         (fake / name).write_text(body)
         (fake / name).chmod(0o755)
     out = run_cli(["doctor"], cfg.project_root, IXMP_DATA=str(home),
@@ -52,13 +57,16 @@ def test_doctor_all_clear(project, tmp_path):
                   "database has CACHED tables only", "ssh nohost without a prompt", "H drive on the cluster",
                   "[storage] roots reach the share on the cluster", "cluster venv imports ixmp and message_ix",
                   "cluster venv is Python 3.11 or newer", "an ixmp config file on the cluster",
-                  "GAMS source on the cluster", "sbatch on the login node"):
+                  "GAMS source on the cluster", "sbatch on the login node",
+                  "the same share here and on the cluster", "partition 'generic' on the cluster"):
         assert lines.get(check) == "ok", (check, out.stdout)
     assert lines.get("[cluster] user set") == "warn"
 
 
 def test_doctor_finds_what_breaks_jobs(project, tmp_path):
-    """A wrong cluster user, roots the cluster cannot see, an old Python without an ixmp config."""
+    """A wrong cluster user, roots the cluster cannot see (the share found here under the configured
+    cluster user, which the account ssh logs in as does not have), a share here that is not the
+    cluster's, a partition the cluster lacks, an old Python without an ixmp config."""
     old = tmp_path / "oldvenv"
     (old / "bin").mkdir(parents=True)
     (old / "bin" / "activate").write_text(f'export PATH="{old / "bin"}:$PATH"\n')
@@ -66,17 +74,24 @@ def test_doctor_finds_what_breaks_jobs(project, tmp_path):
     (old / "bin" / "python").chmod(0o755)
     cfg, hd = project
 
+    elsewhere = tmp_path / "someone_else_share"  # a share this machine reaches, as someone_else
+    elsewhere.mkdir()
+    (elsewhere / "not_the_cluster_share").write_text("")
+
     def edit(text):
-        return (text.replace('ssh_host = "nohost"', 'ssh_host = "nohost"\nuser = "someone_else"')
-                .replace(f'roots = ["{hd}"]', f'roots = ["{hd}", "/nonexistent/share"]'))
+        return (text.replace('ssh_host = "nohost"', 'ssh_host = "nohost"\nuser = "someone_else"\npartition = "nope"')
+                .replace(f'roots = ["{hd}"]', f'roots = ["{tmp_path}/{{cluster_user}}_share", "/nonexistent/share"]'))
 
     out, lines = _doctor(project, tmp_path, edit, venv=str(old))
     assert out.returncode == 1
     assert lines["[cluster] user is the account ssh logs in as"] == "FAIL"
+    assert lines["[storage] roots reach the share on the cluster"] == "FAIL", out.stdout
+    assert lines["the same share here and on the cluster"] == "FAIL", out.stdout
+    assert lines["partition 'nope' on the cluster"] == "FAIL", out.stdout
     assert lines["cluster venv is Python 3.11 or newer"] == "FAIL"
     assert lines["an ixmp config file on the cluster"] == "FAIL"
     assert lines["GAMS source on the cluster"] == "FAIL"
-    cfg.path.write_text(cfg.path.read_text().replace(f'roots = ["{hd}", "/nonexistent/share"]',
+    cfg.path.write_text(cfg.path.read_text().replace(f'roots = ["{tmp_path}/{{cluster_user}}_share", "/nonexistent/share"]',
                                                      'roots = ["/nonexistent/share"]'))
     out2 = run_cli(["doctor", "--local"], cfg.project_root)
     assert out2.returncode == 1 and "FAIL  H drive reachable here" in out2.stdout and "sudo mount" in out2.stdout

@@ -1,4 +1,5 @@
-"""After the runs: cleanup of merged job copies, and resubmission of merges that did not happen."""
+"""After the runs: cleanup of merged job copies (and of read jobs, and one job copy on request), and
+resubmission of merges that did not happen."""
 
 from __future__ import annotations
 
@@ -35,11 +36,18 @@ def _area(cfg, hd, tmp_path):
     for main in ("results", "other"):
         dbc.job_copy(seed, area / "mains" / main, "p", SHARED, model, "test", cfg, kind="main")
 
-    def job(name, close=True, expected=None):
+    def job(name, close=True, expected=None, code=False):
+        """expected: the scenarios to merge ([] for a read job); code: a code copy as job_run.do makes it."""
         d = area / "jobs" / name
         dbc.job_copy(seed, d, "p", SHARED, model, "test", cfg)
-        if expected:
-            (d / dbc.EXPECTED_MERGES).write_text("\n".join(expected) + "\n")
+        if expected is not None:
+            (d / dbc.EXPECTED_MERGES).write_text("".join(f"{s}\n" for s in expected))
+        if code:
+            (d / "code" / "pkg").mkdir(parents=True)
+            (d / "code" / "pkg" / "run.py").write_text("print('staged')\n")
+            (d / "code" / cfg.records).mkdir()
+            (d / "code" / cfg.records / "staged.json").write_text("{}")
+            dbc.record_code_files(d)
         if close:
             dbc.job_close(d)
         return d
@@ -107,12 +115,13 @@ def test_cleanup_deletes_only_proven_merges(project, tmp_path):
 
 FAKE_SBATCH = """#!/bin/bash
 n=$(( $(cat "$FAKE/next") + 1 )); echo $n > "$FAKE/next"
-echo "$n|${SRC_JOB:-}|${SCENARIO:-}|$*" >> "$FAKE/sbatch.log"
+echo "$n|${SRC_JOB:-}|${SCENARIO:-}|${MODEL:-}|$*" >> "$FAKE/sbatch.log"
 echo $n
 """
+# states: "id State [ExitCode]" per line; ExitCode defaults to 0:0.
 FAKE_SACCT = """#!/bin/bash
-while [ $# -gt 0 ]; do [ "$1" = -j ] && id=$2; shift; done
-awk -v id="$id" '$1 == id {print $2}' "$FAKE/states"
+while [ $# -gt 0 ]; do case "$1" in -j) id=$2 ;; -o) field=$2 ;; esac; shift; done
+awk -v id="$id" -v f="$field" '$1 == id {print (f == "ExitCode" ? ($3 == "" ? "0:0" : $3) : $2)}' "$FAKE/states"
 """
 
 
@@ -121,29 +130,32 @@ def test_submit_merges_resubmits_only_what_is_missing(project, tmp_path):
     _git_project(cfg)
     code = Path(stage.stage(cfg, "test", [], local_remote))
     area, job = _area(cfg, hd, tmp_path)
-    jobs = {n: job(n) for n in ("a_1", "b_3", "c_5", "e_9", "f_11")}
+    jobs = {n: job(n) for n in ("a_1", "b_3", "c_5", "e_9", "f_11", "i_17")}
     (jobs["e_9"] / "result.json").unlink()
     runs = area / "runs"
     runs.mkdir()
     rec = runs / "submitted_batch_into_results_1.txt"
     lines = [f"batch batch seed {area}/seeds/s main {area}/mains/results code {code} runs_file x",
              f"run a_1 job=1 dir={jobs['a_1']} scenario=sa merge=2 cmd=x",   # merged
-             f"run b_3 job=3 dir={jobs['b_3']} scenario=sb merge=4 "         # merge failed; its command
-             "cmd=python run.py --scenario=bad --out-dir=results job=9 merge=2",  # mimics every field
+             f"run b_3 job=3 dir={jobs['b_3']} scenario=sb merge=4 model=Canning problem (MESSAGE scheme) "
+             "cmd=python run.py --scenario=bad --out-dir=results job=9 merge=2 model=evil",  # merge failed;
+             # its model holds spaces, its command mimics every field
              f"run c_5 job=5 dir={area}/jobs/c_5 scenario=sc merge=6 cmd=x",  # run still running
              f"run d_7 job=7 dir={area}/jobs/d_7 scenario=sd merge=8 cmd=x",  # run failed
              f"run e_9 job=9 dir={jobs['e_9']} scenario=se merge=10 cmd=x",  # completed, not closed
              f"run f_11 job=11 dir={jobs['f_11']} scenario=sf merge=12 cmd=x",  # merge cancelled...
              "run g_13 job=13 dir=/x/g_13 cmd=x",                            # nothing to merge
              f"run h_15 job=15 dir={area}/jobs/h_15 scenario=sh merge=16 cmd=x",  # merge still queued
-             "remerge f_11 run=11 merge=20"]                                # ...and redone
+             f"run i_17 job=17 dir={jobs['i_17']} scenario=si merge=18 model=m cmd=x",  # merge failed after
+             "remerge f_11 run=11 merge=20"]                                # ...and redone  its backup
     rec.write_text("\n".join(lines) + "\n")
     fake = tmp_path / "fake"
     (fake / "bin").mkdir(parents=True)
     (fake / "next").write_text("100")
     (fake / "states").write_text("1 COMPLETED\n2 COMPLETED\n3 COMPLETED\n4 FAILED\n5 RUNNING\n6 PENDING\n"
                                  "7 FAILED\n8 CANCELLED\n9 COMPLETED\n10 CANCELLED\n11 COMPLETED\n"
-                                 "12 CANCELLED\n20 COMPLETED\n15 RUNNING\n16 PENDING\n")
+                                 "12 CANCELLED\n20 COMPLETED\n15 RUNNING\n16 PENDING\n17 COMPLETED\n"
+                                 "18 FAILED 4:0\n")
     for name, text in (("sbatch", FAKE_SBATCH), ("sacct", FAKE_SACCT)):
         (fake / "bin" / name).write_text(text)
         (fake / "bin" / name).chmod(0o755)
@@ -155,8 +167,10 @@ def test_submit_merges_resubmits_only_what_is_missing(project, tmp_path):
     submitted = {line.split("|")[2]: line for line in log}
     assert sorted(submitted) == ["sb"], log  # c's merge 6 is still pending: not duplicated
     assert "--dependency=singleton" in submitted["sb"] and str(jobs["b_3"]) in submitted["sb"]
+    assert submitted["sb"].split("|")[3] == "Canning problem (MESSAGE scheme)"  # the record's model
     for name, why in (("a_1", "merge 2 is COMPLETED"), ("c_5", "merge 6 is PENDING"), ("d_7", "run 7 is FAILED"),
-                      ("e_9", "no result.json"), ("f_11", "merge 20 is COMPLETED"), ("h_15", "merge 16 is PENDING")):
+                      ("e_9", "no result.json"), ("f_11", "merge 20 is COMPLETED"), ("h_15", "merge 16 is PENDING"),
+                      ("i_17", "merge 18 exited 4 (failed after its backup): restore first")):
         assert f"skip {name}: " in out.stdout and why in out.stdout, (name, out.stdout)
     assert "remerge b_3 run=3 merge=101" in rec.read_text()
 
@@ -168,8 +182,120 @@ def test_submit_merges_resubmits_only_what_is_missing(project, tmp_path):
     assert again.returncode == 0, again.stdout + again.stderr
     new = (fake / "sbatch.log").read_text().splitlines()[len(log):]
     assert len(new) == 1 and "|sc|" in new[0] and "afterok:5,singleton" in new[0], new
+    assert new[0].split("|")[3] == ""  # a record line of 0.3.0 names no model: [project] model
     assert "skip b_3: merge 101 is COMPLETED" in again.stdout
     assert os.access(code / ".ixmp_copies/slurm/job_merge_from_seed.do", os.X_OK)
+    # c_5's new merge is cancelled too: resubmitted with MODEL, which fills in for lines naming none.
+    (fake / "states").write_text((fake / "states").read_text() + "102 CANCELLED\n103 COMPLETED\n")
+    with_model = subprocess.run(["bash", str(code / ".ixmp_copies/slurm/submit_merges.sh"), str(rec)],
+                                capture_output=True, text=True, env={**env, "MODEL": "M_env"})
+    third = (fake / "sbatch.log").read_text().splitlines()[len(log) + 1:]
+    assert len(third) == 1 and third[0].split("|")[2:4] == ["sc", "M_env"], (third, with_model.stdout)
+
+
+def test_submit_merges_reads_the_main_of_a_batch_named_main(project, tmp_path):
+    """A runs file called main.txt: the batch line holds the word main twice."""
+    cfg, hd = project
+    _git_project(cfg)
+    code = Path(stage.stage(cfg, "test", [], local_remote))
+    area, _ = _area(cfg, hd, tmp_path)
+    (area / "runs").mkdir()
+    rec = area / "runs" / "submitted_main_into_results_1.txt"
+    rec.write_text(f"batch main seed {area}/seeds/s main {area}/mains/results code {code} runs_file /r/main.txt\n")
+    env = {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin", "CODE": str(code)}
+    out = subprocess.run(["bash", str(code / ".ixmp_copies/slurm/submit_merges.sh"), str(rec)],
+                         capture_output=True, text=True, env=env)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "merges resubmitted" in rec.read_text()
+
+
+def test_cleanup_keeps_what_a_run_wrote_into_code_and_model(project, tmp_path):
+    """Outputs outside the job folder's top level: new or changed files in the code copy (json
+    records excepted: collect brings those), GDX files (equation duals in model/output) and
+    listings in the model copy; a code copy with no code_files.json at all."""
+    cfg, hd = project
+    area, job = _area(cfg, hd, tmp_path)
+    plain = job("plain_1", code=True)
+    (plain / "code" / "pkg" / "__pycache__").mkdir()
+    (plain / "code" / "pkg" / "__pycache__" / "run.cpython-311.pyc").write_bytes(b"x")  # every import writes one
+    (plain / "code" / cfg.records / "run_plain.json").write_text("{}")
+    (cfg.records_dir).mkdir(parents=True, exist_ok=True)
+    (cfg.records_dir / "run_plain.json").write_text("{}")  # collected
+    (cfg.records_dir / "staged.json").write_text("{}")
+    report = job("report_2", code=True)
+    (report / "code" / "results" / "v6.6").mkdir(parents=True)
+    (report / "code" / "results" / "v6.6" / "report.xlsx").write_text("only copy")
+    (report / "code" / cfg.records / "run_summary.csv").write_text("only copy")
+    changed = job("changed_3", code=True)
+    (changed / "code" / "pkg" / "run.py").write_text("print('edited by the run')\n")
+    duals = job("duals_4", code=True)
+    (duals / "model" / "output" / "MsgOutput_m_sc.gdx").write_text("duals")
+    (duals / "model" / "MESSAGE_run.lst").write_text("listing")
+    old = job("old_5")
+    (old / "code").mkdir()
+    (old / "code" / "run.py").write_text("x")
+    for j in (plain, report, changed, duals, old):
+        _record(cfg, j, "s")
+    assert dbc.job_outputs(cfg, plain) == []
+    assert dbc.job_outputs(cfg, report) == ["code/records/run_summary.csv", "code/results/v6.6/report.xlsx"]
+    assert dbc.job_outputs(cfg, changed) == ["code/pkg/run.py"]
+    assert dbc.job_outputs(cfg, duals) == ["model/MESSAGE_run.lst", "model/output/MsgOutput_m_sc.gdx"]
+    assert "no code_files.json" in dbc.job_outputs(cfg, old)[0]
+    plan = dbc.cleanup_plan(cfg, "test", "results")
+    assert [j.name for j, _ in plan["delete"]] == ["plain_1"]
+    kept = {j.name: why for j, why in plan["keep"]}
+    assert "report.xlsx" in kept["report_2"] and "run_summary.csv" in kept["report_2"]
+    assert "MsgOutput_m_sc.gdx" in kept["duals_4"] and "--include-outputs" in kept["duals_4"]
+    assert "code/pkg/run.py" in kept["changed_3"] and "no code_files.json" in kept["old_5"]
+    every = dbc.cleanup_plan(cfg, "test", "results", include_outputs=True)
+    assert sorted(j.name for j, _ in every["delete"]) == ["changed_3", "duals_4", "old_5", "plain_1", "report_2"]
+    with pytest.raises(Refused, match="copy the code"):
+        dbc.record_code_files(old.parent / "nonexistent")
+
+
+def test_cleanup_of_read_jobs_and_discard(project, tmp_path):
+    """A job declared to merge nothing (scenario -: an empty expected_merges.txt) goes once its records
+    are collected and it holds no output; a job submitted by hand (no expected_merges.txt) stays.
+    --discard deletes one closed copy whatever its merges, with a reason, never an open one."""
+    cfg, hd = project
+    area, job = _area(cfg, hd, tmp_path)
+    cfg.records_dir.mkdir(parents=True)
+    (cfg.records_dir / "staged.json").write_text("{}")  # the code copies' staged record, collected
+    reader = job("read_1", expected=[], code=True)
+    writer = job("read_2", expected=[], code=True)
+    (writer / "code" / "out.csv").write_text("x")
+    by_hand = job("hand_3")
+    failed = job("failed_4", expected=["s"])
+    running = job("running_5", close=False)
+    plan = dbc.cleanup_plan(cfg, "test", "results")
+    assert [(j.name, r) for j, r in plan["delete"]] == [("read_1", [])]
+    kept = {j.name: why for j, why in plan["keep"]}
+    assert "out.csv" in kept["read_2"] and "no merge record" in kept["hand_3"] and "no merge record" in kept["failed_4"]
+    dry = run_cli(["cleanup", "--area", "test", "--main", "results"], cfg.project_root)
+    assert dry.returncode == 0 and "delete  read_1: meant to merge nothing" in dry.stdout, dry.stdout + dry.stderr
+
+    def discard(*args):
+        return run_cli(["cleanup", "--area", "test", *args], cfg.project_root)
+
+    assert discard().returncode == 3  # neither --main nor --discard
+    noreason = discard("--discard", "failed_4")
+    assert noreason.returncode == 3 and "--reason" in noreason.stderr
+    both = discard("--discard", "failed_4", "--reason", "x", "--main", "results")
+    assert both.returncode == 3 and "without --main" in both.stderr
+    assert discard("--discard", "nope_9", "--reason", "x").returncode == 3
+    still_running = discard("--discard", running.name, "--reason", "x", "--apply")
+    assert still_running.returncode == 3 and "not closed" in still_running.stderr and running.exists()
+    with_output = discard("--discard", writer.name, "--reason", "x", "--apply")
+    assert with_output.returncode == 3 and "out.csv" in with_output.stderr and writer.exists()
+    dry = discard("--discard", failed.name, "--reason", "the run failed; not needed")
+    assert dry.returncode == 0 and "dry run" in dry.stdout and failed.exists()
+    done = discard("--discard", failed.name, "--reason", "the run failed; not needed", "--apply")
+    assert done.returncode == 0 and not failed.exists(), done.stderr
+    record = json.loads(next(cfg.records_dir.glob("cleanup_test_discard_failed_4_*.json")).read_text())
+    assert record["reason"] == "the run failed; not needed" and record["discarded"].endswith("failed_4")
+    forced = discard("--discard", writer.name, "--reason", "copied out", "--include-outputs", "--apply")
+    assert forced.returncode == 0 and not writer.exists()
+    assert by_hand.exists() and reader.exists() and running.exists()
 
 
 def test_cleanup_keeps_uncollected_records_and_run_outputs(project, tmp_path):
@@ -178,6 +304,7 @@ def test_cleanup_keeps_uncollected_records_and_run_outputs(project, tmp_path):
     a = job("a_1")
     _record(cfg, a, "s")
     (a / "code" / cfg.records).mkdir(parents=True)
+    dbc.record_code_files(a)  # as job_run.do does right after copying the code
     (a / "code" / cfg.records / "run_a.json").write_text('{"solved": 1}')
     b = job("b_2")
     _record(cfg, b, "s")
