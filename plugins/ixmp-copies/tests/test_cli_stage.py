@@ -297,6 +297,34 @@ def test_transfer_into_a_platform_not_opened_yet(project, tmp_path):
 
 
 @needs_ixmp
+def test_transfer_target_folder(project, tmp_path):
+    """A database yet to be created is one in an empty folder or a missing folder below an existing
+    one; a url whose parent folder is missing too (a typo, an unmounted disk) is refused, as is a
+    folder holding other files."""
+    cfg, _ = project
+    home = tmp_path / "ixmp_home"
+    home.mkdir()
+
+    def transfer_to(db: Path):
+        (home / "config.json").write_text(json.dumps({"platform": {"default": "ixmp-dev", "ixmp-dev": {
+            "class": "jdbc", "driver": "oracle", "url": "x", "user": "u", "password": "p"},
+            cfg.platform: {"class": "jdbc", "driver": "hsqldb",
+                           "url": f"jdbc:hsqldb:file:{db};hsqldb.default_table_type=cached"}}}))
+        return run_cli(["transfer", "--from", "ixmp-dev", "--to", cfg.platform, "--scenario", "s"], cfg.project_root,
+                       IXMP_DATA=str(home))
+
+    unmounted = transfer_to(tmp_path / "not" / "mounted" / "db")
+    assert unmounted.returncode == 3 and "nor its parent" in unmounted.stderr, unmounted.stdout + unmounted.stderr
+    assert "a new database" not in unmounted.stdout
+    below = transfer_to(tmp_path / "newdb" / "db")  # missing, below an existing folder
+    assert below.returncode == 0 and "a new database, nothing to back up" in below.stdout, below.stdout + below.stderr
+    (tmp_path / "busy").mkdir()
+    (tmp_path / "busy" / "notes.txt").write_text("x")
+    busy = transfer_to(tmp_path / "busy" / "db")
+    assert busy.returncode == 3 and "not an empty folder" in busy.stderr, busy.stdout + busy.stderr
+
+
+@needs_ixmp
 def test_platform_add(project, tmp_path):
     cfg, hd = project
     home = tmp_path / "ixmp_home"

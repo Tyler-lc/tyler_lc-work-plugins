@@ -135,6 +135,7 @@ mp.close_db()
     record_path.rename(record_path.with_suffix(".aside"))
     again = run_cli(repeat, root, **menv)
     assert again.returncode == 3 and "already merged" in again.stderr, again.stderr[-1000:]  # by the main itself
+    assert "clone it" not in again.stderr  # a run job's copy cannot have changed since: no such advice
     record_path.with_suffix(".aside").rename(record_path)
     assert dbc.verify(seed) == []
 
@@ -167,6 +168,7 @@ mp.close_db()
     x_record.rename(x_record.with_suffix(".aside"))
     by_main = run_cli(again_x, root, **menv)
     assert by_main.returncode == 3 and "already merged" in by_main.stderr, by_main.stderr[-1000:]
+    assert "clone it to a new version there and merge that" in by_main.stderr, by_main.stderr[-1000:]
     x_record.with_suffix(".aside").rename(x_record)
 
     # transfer: the original database to one registered but never opened (no files yet: nothing

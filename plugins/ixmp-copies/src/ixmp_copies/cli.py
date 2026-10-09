@@ -56,9 +56,11 @@ Inside a job (see the SLURM templates):
                                         that is a new version, or the default solved in place
                                         (unsolved before, solved after)
     merge --job-dir DIR --scenario S [--version N | --version default] [--allow-unsolved]
-          [--model M] [--into P] [--apply]
+          [--despite-failed-run] [--model M] [--into P] [--apply]
                                         the version is the one the run recorded (run-mark);
-                                        a job without that record needs --version
+                                        a job without run records needs --version; a job whose
+                                        run did not complete (no run-mark --after) is refused
+                                        unless --version N --despite-failed-run
 
 P defaults to [project] platform, M to [project] model. Without --apply, backup, restore,
 seed, merge and transfer only run their checks.
@@ -438,9 +440,23 @@ def cmd_run_mark(args) -> int:
     return 0
 
 
-def _merge_version(job_dir: Path, model: str, scenario: str, requested, allow_unsolved: bool):
-    """The version a merge brings back, and the run's own record of it when there is one."""
+def _merge_version(job_dir: Path, model: str, scenario: str, requested, allow_unsolved: bool,
+                   despite_failed_run: bool = False):
+    """The version a merge brings back, and the run's own record of it when there is one. A run
+    that recorded its scenario before its command and nothing after it did not complete: nothing
+    says which version is its result, so only a named version with --despite-failed-run merges."""
     result_file = job_dir / copies.RUN_RESULT
+    incomplete = (job_dir / copies.RUN_BEFORE).exists() and not result_file.exists()
+    if despite_failed_run and not incomplete:
+        raise Refused(f"--despite-failed-run is for a job whose run did not complete; {job_dir} has "
+                      + (f"its run's record ({copies.RUN_RESULT})" if result_file.exists() else "no run records"))
+    if incomplete:
+        if not (despite_failed_run and isinstance(requested, int)):
+            raise Refused(f"{job_dir}'s run did not complete: {copies.RUN_BEFORE} is there and {copies.RUN_RESULT} "
+                          "is not (its command failed, or run-mark --after never ran), so no version of the copy is "
+                          "known to be the run's result. Nothing is merged. To merge a version by hand after "
+                          "checking it, name it: --version N --despite-failed-run")
+        return requested, None
     if result_file.exists():
         run = json.loads(result_file.read_text())
         if (run["model"], run["scenario"]) != (model, scenario):
@@ -471,7 +487,8 @@ def cmd_merge(args) -> int:
     model, into = _model(cfg, args), args.into or cfg.platform
     job_dir = Path(args.job_dir).resolve()
     copies.require_job_result(job_dir)
-    version, run = _merge_version(job_dir, model, args.scenario, args.version, args.allow_unsolved)
+    version, run = _merge_version(job_dir, model, args.scenario, args.version, args.allow_unsolved,
+                                  args.despite_failed_run)
     seed_file = job_dir / copies.SEED_MERGE
     # A run's merge is marked by the job that ran it. A seed merge is marked by the database the
     # seed's versions came from, the same in every resubmission and through every newer seed of
@@ -479,8 +496,13 @@ def cmd_merge(args) -> int:
     if seed_file.exists():
         seed = Path(seed_file.read_text().strip()).resolve()
         source, old_source = copies.seed_origin(seed), str(seed)
+        # The marker names a version number, not its content: a version changed in place since
+        # its merge keeps the number, so the refusal says how to bring the change.
+        changed = (". If that version changed since (solved or edited in place, or the database was "
+                   "recreated), clone it to a new version there and merge that")
     else:
         source = old_source = str(job_dir)
+        changed = ""
     dst = platform_db(into)
     copies.require_closed(dst)
     label = copies.copy_label(dst, into, cfg)
@@ -493,7 +515,8 @@ def cmd_merge(args) -> int:
         marker, legacy = markers(version)
         earlier = copies.find_merge_record(cfg, dst, marker, model, args.scenario, legacy=legacy)
         if earlier:
-            raise Refused(f"{model}/{args.scenario} v{version} from {source} was merged into {into} before: {earlier}")
+            raise Refused(f"{model}/{args.scenario} v{version} from {source} was merged into {into} before: "
+                          f"{earlier}{changed}")
     print(f"{model}/{args.scenario} v{version} from {job_dir} -> {into} ({dst}); "
           f"pre-merge backup to {backups / label}/; record merge_{label}_*")
     if not args.apply:
@@ -514,7 +537,7 @@ def cmd_merge(args) -> int:
             out = _guarded("MERGE", backup_dir, f"{into} ({dst})", lambda: merge_scenario(
                 src_mp, dst_mp, model, args.scenario, version, marker, cfg.marker_key, legacy))
         except AlreadyMerged as err:
-            raise Refused(str(err)) from err
+            raise Refused(f"{err}{changed}") from err
         finally:
             dst_mp.close_db()
     finally:
@@ -522,6 +545,7 @@ def cmd_merge(args) -> int:
     model_source = job_dir / "model_source.json"
     out.update({"job_dir": str(job_dir), "into": into, "into_db": str(dst), "label": label,
                 "pre_merge_backup": str(backup_dir), "merge_source_copy": str(src_dir), "run": run,
+                "despite_failed_run": args.despite_failed_run,
                 "model_source": json.loads(model_source.read_text()) if model_source.exists() else None})
     record = _record(cfg, f"merge_{label}_{args.scenario}_v{version}_{stamp}", out)
     print(json.dumps(out, indent=2, default=str))
@@ -532,6 +556,27 @@ def cmd_merge(args) -> int:
         raise OperationFailed(f"merged and recorded ({record}), but {err}; check before the next merge, "
                               f"or restore from {backup_dir}") from err
     return 0 if out["compare"]["ok"] else 2
+
+
+def _fresh_target(db: Path) -> bool:
+    """Whether the HyperSQL database `db` is yet to be created: no files beside its stem, in a
+    folder that is empty (platform-add makes it) or does not exist below one that does. A platform
+    registered but never opened has nothing to back up or to find open; HyperSQL creates the
+    database on the first open. A folder holding other files, or one whose parent is missing too
+    (a mistyped url, a disk not mounted), is refused: HyperSQL would create a database there all
+    the same."""
+    if any(db.parent.glob(f"{db.name}.*")):
+        return False
+    folder = db.parent
+    if folder.exists():
+        if not folder.is_dir() or any(folder.iterdir()):
+            raise Refused(f"{folder} holds no {db.name}.* database but is not an empty folder: is the platform's "
+                          "url the database meant?")
+        return True
+    if not folder.parent.is_dir():
+        raise Refused(f"neither {folder} nor its parent {folder.parent} exists: a mistyped url, or a disk not "
+                      "mounted? Create the folder (or run platform-add) where the database belongs")
+    return True
 
 
 def cmd_transfer(args) -> int:
@@ -551,9 +596,7 @@ def cmd_transfer(args) -> int:
     cfg = config_mod.load()
     model = _model(cfg, args)
     dst_db = platform_db(args.to) if is_hsqldb(args.to) else None
-    # A platform registered but never opened (platform-add) has no database files yet: nothing
-    # to back up or to find open; HyperSQL creates the database on the transfer's first open.
-    fresh = dst_db is not None and not any(dst_db.parent.glob(f"{dst_db.name}.*"))
+    fresh = dst_db is not None and _fresh_target(dst_db)
     if dst_db is not None and not fresh:
         copies.require_closed(dst_db)
     print(f"{model}/{args.scenario} v{args.version or 'default'}: {args.source} -> {args.to}"
@@ -642,7 +685,9 @@ def parser() -> argparse.ArgumentParser:
     when.add_argument("--before", action="store_true")
     when.add_argument("--after", action="store_true")
     add("merge", cmd_merge, "--job-dir", "--scenario", version={"type": _version}, model={}, into={}, apply=apply,
-        allow_unsolved={"action": "store_true"})
+        allow_unsolved={"action": "store_true"},
+        despite_failed_run={"action": "store_true",
+                            "help": "merge --version N from a job whose run did not complete (checked by hand)"})
     t = add("transfer", cmd_transfer, "--to", "--scenario", version={"type": int}, model={}, apply=apply)
     t.add_argument("--from", dest="source", required=True, help="source platform name")
     return p

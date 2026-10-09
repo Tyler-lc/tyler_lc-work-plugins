@@ -151,3 +151,48 @@ def test_seed_merges_of_several_scenarios_at_one_version(setup):
     assert a.returncode == 3 and "was merged into" in a.stderr, a.stderr
     _earlier(cfg, main, dbc.merge_marker(dbc.seed_origin(seed), "m", "b", 1), scenario="b")
     assert merge("--version", "1", scenario="b").returncode == 3
+
+
+def test_a_run_that_did_not_complete_is_not_merged(setup):
+    """run-mark --before ran, run-mark --after did not (the command failed): no version of the copy is
+    known to be the run's result. --version default would bring back the seed's version; refused, as is
+    any version, unless named with --despite-failed-run (a merge by hand after checking it)."""
+    _, area, _, job, _, merge, _ = setup
+    (job / dbc.RUN_BEFORE).write_text(json.dumps(
+        {"model": "m", "scenario": "sc", "versions": [1], "default": 1, "solved": False}))
+    for extra in ((), ("--version", "default"), ("--version", "1"), ("--version", "default", "--despite-failed-run"),
+                  ("--version", "default", "--apply")):
+        out = merge(*extra)
+        assert out.returncode == 3 and "did not complete" in out.stderr, (extra, out.stdout + out.stderr)
+        assert "--version default" not in out.stderr.split("REFUSED:", 1)[1], out.stderr  # no longer invited
+    assert not (area / "backups").exists() and not list(job.glob("merge_src_*"))
+    by_hand = merge("--version", "1", "--despite-failed-run")
+    assert by_hand.returncode == 0 and "dry run" in by_hand.stdout, by_hand.stdout + by_hand.stderr
+
+
+def test_despite_failed_run_only_where_a_run_did_not_complete(setup):
+    _, _, _, job, _, merge, run_result = setup
+    none = merge("--version", "1", "--despite-failed-run")  # no run records at all
+    assert none.returncode == 3 and "no run records" in none.stderr, none.stderr
+    run_result()
+    done = merge("--version", "2", "--despite-failed-run")
+    assert done.returncode == 3 and "its run's record" in done.stderr, done.stderr
+
+
+def test_a_seed_merge_refusal_says_how_to_bring_a_changed_version(setup, tmp_path):
+    """The marker names a version number, not its content: a version solved or edited in place on the
+    workstation after its merge keeps its number, and its merge through a newer seed is refused. The
+    refusal says to clone it to a new version and merge that; a run job's refusal does not."""
+    cfg, area, seed, job, main, merge, run_result = setup
+    live = tmp_path / "live" / "db"
+    _earlier(cfg, main, dbc.merge_marker(str(live), "m", "sc", 4))
+    Path(f"{live}.data").write_bytes(b"\x07" * 5000)  # the live database changed since
+    later, _ = dbc.backup(live, tmp_path / "bk2", "l2")
+    seed2, _, _ = dbc.seed(later, "test", "s2", cfg)
+    via_seed2 = merge("--version", "4", job_dir=_seed_job(cfg, seed2, area, "merge_seed_9", model_src(tmp_path / "m2")))
+    assert via_seed2.returncode == 3 and "was merged into" in via_seed2.stderr, via_seed2.stderr
+    assert "clone it to a new version there and merge that" in via_seed2.stderr, via_seed2.stderr
+    run_result()
+    _earlier(cfg, main, dbc.merge_marker(str(job.resolve()), "m", "sc", 2), n=2)
+    again = merge()
+    assert again.returncode == 3 and "was merged into" in again.stderr and "clone it" not in again.stderr
