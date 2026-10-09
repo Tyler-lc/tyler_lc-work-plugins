@@ -72,14 +72,20 @@ wherever it is mounted on the workstation.
    an existing name and forgets the call leaves the old version as default. The job records
    `SCENARIO`'s versions before the command and the default version after it (`run-mark`). It
    accepts a default version that was not there before, or the same default version solved in
-   place (unsolved before, solved after). It refuses everything else, including the same default
-   solved both before and after: a re-solve in place cannot be told from a command that did
-   nothing, so clone to a new version before solving a scenario the seed holds solved. A refused
-   run fails its job, and the merge brings back exactly the version the job recorded, for the
-   model it recorded, refusing an unsolved one unless told (`--allow-unsolved`). `SCENARIO` `-`
-   means no merge (a read job). `AFTER=<jobid>` makes every run wait for, e.g., the seed job;
-   `MODEL` sets the model when it is not `[project] model`, and the submission record keeps it
-   for `submit_merges.sh`. Every merge into a main runs alone (`--dependency=singleton`).
+   place (unsolved before, solved after) when the run made no other version. It refuses
+   everything else: the same default solved both before and after (a re-solve in place cannot be
+   told from a command that did nothing, so clone to a new version before solving a scenario the
+   seed holds solved); the default solved in place beside a new version left non-default (a base
+   solve, then a clone whose `set_as_default()` was forgotten); an older version made default. A
+   refused run fails its job, and the merge brings back exactly the version the job recorded, for
+   the model it recorded, refusing an unsolved one unless told (`--allow-unsolved`). A job whose
+   command failed has no such record, and its merge is refused. `SCENARIO` `-` means no merge (a
+   read job). `AFTER=<jobid>` makes every run wait for, e.g., the seed job; `MODEL` sets the model
+   when it is not `[project] model`. The submission record (`<area>/runs/submitted_*.txt`) gets
+   each run's line as soon as it is submitted (`run NAME job=ID dir=DIR [scenario=S] model=M
+   cmd=...`) and its merge's on a line of its own (`merge NAME merge=ID`): a merge whose submission
+   failed leaves its run recorded, the batch stops there, and `submit_merges.sh` submits that
+   merge. Every merge into a main runs alone (`--dependency=singleton`).
 6. Check each job's `Exit:` line (`grep -H Exit: <area>/runs/*.out`: run, mark, close and seed
    all 0) and its merge record.
 7. Workstation: `ixmp-copies collect --area live` brings the records home (json records are
@@ -95,19 +101,33 @@ AREA=live NAME=<seed> SRC_JOB=<A's job dir> -- --dependency=afterok:<A>`, then `
   `CODE=<snapshot> bash $CODE/.ixmp_copies/slurm/submit_merges.sh <area>/runs/submitted_*.txt`.
   It reads the batch's submission record and resubmits only what is missing: it skips runs whose
   latest merge completed or is still queued, merges finished runs now and still-running ones
-  after them, and skips failed runs. It also skips a merge whose last attempt exited 4 (failed
-  after its backup, the main may hold a partial version): restore the main from the backup that
-  merge's log names first, then resubmit. `CODE` may be a newer snapshot with the fix. Safe to
+  after them, and skips failed runs. `CODE` may be a newer snapshot with the fix. Safe to
   repeat: the tool refuses a merge already made.
+- **A merge exited 4** (failed after its pre-merge backup): the main may hold what it made, so
+  `submit_merges.sh` skips it until told. Check the main first (`job_backup_main.do` and a
+  `restore` on the workstation, or a read job on a seed made from a backup of the main). If a
+  version of the scenario carries that merge's marker (scenario meta `[merge] marker_key`), the
+  clone landed and a resubmission is refused by the marker; check that version by hand, since its
+  merge record was never written. If none does, the merge did not land: resubmit with
+  `FORCE_RUNS="NAME ..." CODE=... bash .../submit_merges.sh <record>` (the runs' names). A version
+  a failed clone left half-made carries no marker and stays: note its number. The tool does not
+  restore a main in place, by design: the backup the merge's log names is a copy to read, or to
+  restore elsewhere.
 - **Scenarios exist only in a seed** (built on the workstation after the main was made): back up,
   seed, then `submit.sh job_merge_from_seed.do AREA=live SEED=... MAIN=... SCENARIOS="name name:version ..."
   -- --job-name=merge_into_<main> --dependency=singleton` (no version: the seed's default). Its
   merges are marked by the database the seed's versions came from (the database that was backed
   up, or the job copy a seed was made from) and by model, scenario and version: after a partial
   failure resubmit the same `SCENARIOS`, and what merged before is refused, the rest merges; the
-  same version brought through a newer seed of the same database is refused too.
-- **A merge by hand** of a job without a run record names the version: `merge ... --version N`, or
-  `--version default` for the copy's default version.
+  same version brought through a newer seed of the same database is refused too. The marker names
+  a version number, not its content: a version solved or edited in place on the workstation after
+  its merge (or a database recreated since) keeps its number and is refused as merged. Clone it to
+  a new version there, back up, seed, and merge that.
+- **A merge by hand** of a job without run records names the version: `merge ... --version N`, or
+  `--version default` for the copy's default version. A job whose run did not complete
+  (`run_before.json` without `run_result.json`: its command failed, or `run-mark --after` never
+  ran) is refused whatever the version; after checking a version by hand, `--version N
+  --despite-failed-run` merges it, and the merge record says so.
 
 ## Getting results out
 
@@ -145,15 +165,18 @@ scenario and by `job_merge_from_seed.do`) has one, the job's own `.json` records
   GAMS scratch (`225*`) in the job's model copy. Every job that solved has these.
 
 So copy out what is needed, then `cleanup ... --include-outputs --apply` deletes merged job
-copies whatever they hold. Kept: open or failed jobs, jobs without a record (a job submitted by
-hand without `MERGE_SCENARIO` included), jobs whose merge failed or went elsewhere. Merge records
+copies whatever they hold. Kept: open or failed jobs, jobs holding a merge's copy of their
+database (`merge_src_*`) that is not closed (a merge running, on any host, or one that died),
+jobs without a record (a job submitted by hand without `MERGE_SCENARIO` included), jobs whose
+merge failed or went elsewhere. New files and files of another size in a code copy count as
+output without being read; files of the recorded size are hashed. Merge records
 are read from the area's snapshots and from the project's records folder.
 
 One job copy the user decided is not needed (a failed run, a merge that will never be made):
 `ixmp-copies cleanup --area A --discard JOB --reason "<why>"` (dry run), then with `--apply`.
 It deletes that copy whatever its merges, once its job closed it, its records are collected and
 it holds no output (unless `--include-outputs`), and writes a cleanup record with the reason. It
-refuses a copy whose database is not closed: a job killed mid-solve leaves the same markers as a
+refuses a copy whose database, or a merge's copy of it (`merge_src_*`), is not closed: a job killed mid-solve leaves the same markers as a
 running one, so that is a question for the user. Seeds, mains and backups are never touched: old
 seeds and pre-merge backups stay until the user decides to delete them.
 
@@ -163,7 +186,7 @@ seeds and pre-merge backups stay until the user decides to delete them.
 project or ixmp config, a command line the tool does not accept); 2 a copy does not match its source, `verify` found a difference, a
 merge/transfer comparison failed, or `collect` met a record it will not overwrite; 4 a merge or
 transfer failed after its backup, or left its target not shut down cleanly (the message names
-the backup to restore from); 1 a failed `doctor` check, or Python's own code for an uncaught
+the backup taken before it; for a results main, see "A merge exited 4" above); 1 a failed `doctor` check, or Python's own code for an uncaught
 error, which is a bug or an unforeseen failure, never a refusal. In job scripts the `Exit:` line
 lists each step's code.
 
@@ -176,13 +199,13 @@ lists each step's code.
 | `job-copy` | `IXMP_DATA` already set; this account has no ixmp config file; the folder exists or is not directly below `<area>/jobs/` (`mains/` for `--kind main`); the seed does not match its manifest; no message model dir |
 | `job-check` | ixmp in this process does not resolve the platform to the job's copy, the model dir to the job's `model/`, or knows any other platform |
 | `job-close` | the copy is not closed; `result.json` exists |
-| `run-mark --after` | the default version is neither new nor the default solved in place (unsolved before, solved after): no default, an older version made default, still unsolved, or solved before and after |
-| `merge` | the job copy changed since `job-close`; the run's record was refused by `run-mark`, shows an unsolved version (without `--allow-unsolved`), another model or scenario, or another version than `--version`; no run record and no `--version`; a passing merge record of the same model and scenario with the same marker exists (checked before the backup); the target is not closed; the same merge was made before (scenario meta `[merge] marker_key`: `merged from <source> <model>/<scenario> v<N>`, the source being the job copy, or for a seed merge the database the seed's versions came from); no model |
-| `cleanup` | (keeps, with the reason) open jobs, uncollected records, run outputs (job folder, code copy, GDX and listings in the model copy), missing or failed merges; no `--main` and no `--discard` |
-| `cleanup --discard` | no `--reason`; with `--main`; no such job copy; not closed by its job, or its database not closed; uncollected records; run outputs (without `--include-outputs`) |
+| `run-mark --after` | the default version is neither new nor the default solved in place (unsolved before, solved after, no other version made): no default, an older version made default, still unsolved, solved before and after, or solved in place beside a new version left non-default |
+| `merge` | the job copy changed since `job-close`; the run did not complete (`run_before.json` without `run_result.json`), unless `--version N --despite-failed-run`; `--despite-failed-run` on any other job; the run's record was refused by `run-mark`, shows an unsolved version (without `--allow-unsolved`), another model or scenario, or another version than `--version`; no run record and no `--version`; a passing merge record of the same model and scenario with the same marker exists (checked before the backup); the target is not closed; the same merge was made before (scenario meta `[merge] marker_key`: `merged from <source> <model>/<scenario> v<N>`, the source being the job copy, or for a seed merge the database the seed's versions came from); no model |
+| `cleanup` | (keeps, with the reason) open jobs, a `merge_src_*` copy not closed, uncollected records, run outputs (job folder, code copy, GDX and listings in the model copy), missing or failed merges; no `--main` and no `--discard` |
+| `cleanup --discard` | no `--reason`; with `--main`; no such job copy; not closed by its job, or its database or a `merge_src_*` copy not closed; uncollected records; run outputs (without `--include-outputs`) |
 | `job_seed.do` | both `BACKUP` and `SRC_JOB` set |
 | `restore` | the backup does not match its manifest; the destination exists or is on the H drive |
-| `transfer` | a HyperSQL target is not closed (a target whose database files do not exist yet is new: nothing to back up); the scenario has no default version and no `--version` |
+| `transfer` | a HyperSQL target is not closed (a target whose database files do not exist yet, in an empty folder or a missing folder below an existing one, is new: nothing to back up); a target folder that holds other files, or whose parent folder is missing too (a mistyped url, a disk not mounted); the scenario has no default version and no `--version` |
 
 ## Rules
 
@@ -216,7 +239,9 @@ lists each step's code.
   job version to main version. The JDBC cross-platform clone replaces the annotation with its own,
   so never identify a version by its annotation; the merge marker is scenario meta.
 - A failed clone (out of heap) has been seen to roll back, but that does not prove it for every
-  failure: exit 4 says the target *may* hold a partial version. The remedy is the named backup.
+  failure: exit 4 says the target *may* hold a partial version. For a local database, the remedy
+  is the named backup, restored to a new folder; a results main is checked and resubmitted as in
+  "A merge exited 4", never restored in place.
 - Records and backups of a results main carry the main's folder name as label, those of any other
   database the platform name.
 - The cluster's GAMS may differ from the workstation's: compare a re-run within tolerances, not

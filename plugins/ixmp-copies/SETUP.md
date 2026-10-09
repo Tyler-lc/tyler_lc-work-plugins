@@ -140,7 +140,9 @@ This registers `[project] platform` in your ixmp config with `hsqldb.default_tab
 in its url. Without it, older ixmp versions create MEMORY tables, which hold the whole database
 in the JVM and make every open slower as scenarios accumulate (the tool refuses to seed from such
 a database). The database is created on first open, which may be the first `transfer` into it
-(step 7); keep it on a local disk, never on the H drive. `--dir` may also name an existing
+(step 7); keep it on a local disk, never on the H drive. `transfer` takes a platform for a new
+database only when its folder is empty, or missing below an existing folder: a url whose parent
+folder is missing too (a typo, a disk not mounted) is refused. `--dir` may also name an existing
 database (e.g. one made by `restore`).
 
 ## 7. Scenarios into it
@@ -168,6 +170,8 @@ and runs the whole chain on the cluster:
 - a seed and a results main
 - two solves in parallel on their own copies, and their merges
 - a solve that forgets `set_as_default()`: its job fails and nothing is merged
+- a solve in place of the seed's unsolved default, then a new version solved without
+  `set_as_default()`: its job fails too, and nothing is merged
 - a solve in place of the seed's unsolved default version: accepted and merged
 - a merge cancelled on purpose, recovered with `submit_merges.sh`
 - a scenario made on the workstation afterwards, merged from a newer seed
