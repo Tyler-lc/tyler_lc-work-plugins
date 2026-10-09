@@ -12,6 +12,8 @@
 #   - a seed and a results main;
 #   - two solves in parallel, each on its own copy, and their merges;
 #   - a solve that forgets set_as_default(): its job fails and its merge never runs;
+#   - a solve of the seed's unsolved `standard` v1 in place, then a clone to v2 solved without
+#     set_as_default(): its job fails too (v1 is solved, but the run's result is v2);
 #   - a solve in place of the seed's unsolved `standard` (no clone): accepted and merged;
 #   - a third solve whose merge is cancelled and recovered with submit_merges.sh (the record's
 #     model, which holds spaces, reaches the merge);
@@ -20,7 +22,8 @@
 #   - two read jobs (no merge), one writing a file into its code copy;
 #   - collect, and cleanup in two passes: first only the job copies holding no run output (the
 #     read job without a file, the seed merge's copy), then with --include-outputs the merged
-#     solves (GDX files) and the read job's file; the failed ones stay.
+#     solves (GDX files) and the read job's file; the two failed runs and the refused seed merge
+#     stay.
 # It writes on the H drive only below ixmp_copies/trial_<time>/. Exit 0 when every step and
 # check passed.
 set -euo pipefail
@@ -42,7 +45,8 @@ git init -q
 cat > solve.py <<'EOF'
 """Solve the Dantzig model on the job's own copy as TARGET (re-solving `standard` makes a new
 version) and make it the default, unless --no-default (the mistake run-mark must catch). With
---in-place, solve TARGET's default version itself, no clone (the seed holds it unsolved)."""
+--in-place, solve TARGET's default version itself, no clone (the seed holds it unsolved). With
+--base-solve, solve `standard`'s default version in place first, then clone it."""
 import sys
 
 import ixmp
@@ -54,6 +58,8 @@ if "--in-place" in sys.argv:
     scen = message_ix.Scenario(mp, model, target)
 else:
     base = message_ix.Scenario(mp, model, "standard")
+    if "--base-solve" in sys.argv:
+        base.solve(quiet=True)
     scen = base.clone(scenario=target, keep_solution=False)
 scen.solve(quiet=True)
 if "--no-default" not in sys.argv:
@@ -85,6 +91,9 @@ EOF
 # Re-solving an existing name without set_as_default() leaves the old version as default: the
 # trap. (A new name's first version is made default by ixmp itself.)
 echo "solve_f standard python solve.py standard --no-default" > runs_forgot.txt
+# The seed's default v1 solved in place on the way, then v2 made and solved without set_as_default():
+# after the run v1 is default and solved, but it is not the run's result.
+echo "solve_g standard python solve.py standard --base-solve --no-default" > runs_base.txt
 echo "solve_c standard_c python solve.py standard_c" > runs_late.txt
 echo "solve_i standard python solve.py standard --in-place" > runs_inplace.txt
 printf 'read_n - python read.py\nread_o - python read.py --write read_output.txt\n' > runs_read.txt
@@ -157,6 +166,18 @@ states_f=$(states "$run_f,$merge_f"); echo "$states_f"
 echo "$states_f" | grep -q "^$run_f|FAILED" || { echo "the run that forgot set_as_default did not fail" >&2; exit 1; }
 echo "$states_f" | grep -q "^$merge_f|CANCELLED" || { echo "its merge was not cancelled" >&2; exit 1; }
 remote "grep -h '^Exit: run 0 mark 3 ' $AREA/runs/solve_f_$run_f.out"
+
+say "a base solve in place, then a new version solved without set_as_default(): refused too"
+based=$(remote "cd $CODE && $RUNS $AREA/seeds/seed1 $MAIN runs_base.txt")
+echo "$based"
+run_g=$(echo "$based" | sed 's/ cmd=.*//' | grep -o ' job=[0-9]*' | head -1 | cut -d= -f2)
+merge_g=$(echo "$based" | sed 's/ cmd=.*//' | grep -o ' merge=[0-9]*' | head -1 | cut -d= -f2)
+wait_done "$run_g,$merge_g"
+states_g=$(states "$run_g,$merge_g"); echo "$states_g"
+echo "$states_g" | grep -q "^$run_g|FAILED" || { echo "the run that left its new version non-default did not fail" >&2; exit 1; }
+echo "$states_g" | grep -q "^$merge_g|CANCELLED" || { echo "its merge was not cancelled" >&2; exit 1; }
+remote "grep -h '^Exit: run 0 mark 3 ' $AREA/runs/solve_g_$run_g.out"
+remote "grep -h 'a version the run made is not default' $AREA/runs/solve_g_$run_g.out"
 
 say "a solve in place of the seed's unsolved default version: accepted, merged"
 inplace=$(remote "cd $CODE && $RUNS $AREA/seeds/seed1 $MAIN runs_inplace.txt")
@@ -250,12 +271,12 @@ echo "left: $left"
 for gone in "read_n_$run_n" "merge_seed_$from_seed"; do
     case " $left " in *" $gone "*) echo "cleanup kept $gone (no output, merged or read only)" >&2; exit 1 ;; esac
 done
-for kept in "read_o_$run_o" "solve_i_$run_i" "solve_c_$run_c"; do
+for kept in "read_o_$run_o" "solve_i_$run_i" "solve_c_$run_c" "solve_f_$run_f" "solve_g_$run_g"; do
     case " $left " in *" $kept "*) ;; *) echo "cleanup deleted $kept, which holds run output" >&2; exit 1 ;; esac
 done
 ixc cleanup --area test --main results --include-outputs --apply
 left=$(ls "$LOCAL_AREA/jobs" | sort | paste -sd' ')
-want="merge_seed_$resubmitted solve_f_$run_f"
+want="merge_seed_$resubmitted solve_f_$run_f solve_g_$run_g"
 [ "$left" = "$want" ] || { echo "after cleanup --include-outputs: [$left], wanted [$want]" >&2; exit 1; }
 ixc verify "$LOCAL_AREA/seeds/seed1"
 ixc verify "$LOCAL_AREA/seeds/seed2"
