@@ -9,8 +9,13 @@
 # version and what gets merged ("-" for no merge); COMMAND runs in the job's code copy.
 # Optional env: AFTER (a job id every run waits for, e.g. the seed job), MODEL (the scenarios'
 # model; default [project] model), RUN_OPTS / MERGE_OPTS (extra sbatch options, e.g.
-# "--time=08:00:00 --mem=64G"). The record's run lines carry the model (model=..., the last field
-# before cmd=), so submit_merges.sh merges the same model/scenario.
+# "--time=08:00:00 --mem=64G").
+# The submission record gets a run's line as soon as the run is submitted,
+#   run NAME job=ID dir=JOB_DIR [scenario=SCENARIO] model=MODEL cmd=COMMAND
+# (the model, which may hold spaces, is the last field before cmd=), and then its merge's line,
+#   merge NAME merge=ID
+# so a run whose merge could not be submitted is still recorded, and submit_merges.sh merges it
+# with the same model and scenario.
 # Every merge into MAIN runs under one job name with --dependency=singleton, one at a time;
 # a failed run cancels its own merge only. Refuses a second submission of the same RUNS_FILE
 # into the same MAIN. Logs and the submission record go to <area>/runs/.
@@ -47,14 +52,18 @@ while read -r name scenario cmd || [ -n "$name" ]; do
         sbatch --parsable --export=ALL --partition="$IXC_PARTITION" --job-name="$name" "${DEP[@]}" \
         ${RUN_OPTS:-} "$D/job_run.do")
     line="run $name job=$run dir=$JOBS/${name}_${run}"
-    if [ "$scenario" != "-" ]; then
-        # shellcheck disable=SC2086
-        merge=$(CODE="$CODE" MAIN="$MAIN" SRC_JOB="$JOBS/${name}_${run}" SCENARIO="$scenario" \
+    if [ "$scenario" != "-" ]; then line="$line scenario=$scenario"; fi
+    echo "$line model=${MODEL:-$IXC_MODEL} cmd=$cmd" | tee -a "$REC"
+    [ "$scenario" != "-" ] || continue
+    # shellcheck disable=SC2086
+    if ! merge=$(CODE="$CODE" MAIN="$MAIN" SRC_JOB="$JOBS/${name}_${run}" SCENARIO="$scenario" \
             MODEL="${MODEL:-}" VERSION="" sbatch --parsable --export=ALL --partition="$IXC_PARTITION" \
             --job-name="merge_into_$MAIN_NAME" --dependency="afterok:$run,singleton" \
-            --kill-on-invalid-dep=yes ${MERGE_OPTS:-} "$D/job_merge.do")
-        line="$line scenario=$scenario merge=$merge"
+            --kill-on-invalid-dep=yes ${MERGE_OPTS:-} "$D/job_merge.do"); then
+        echo "the merge of $name could not be submitted; run $run is recorded in $REC: submit its merge with" \
+            "submit_merges.sh $REC. Runs after $name in $RUNS_FILE were not submitted." >&2
+        exit 1
     fi
-    echo "$line model=${MODEL:-$IXC_MODEL} cmd=$cmd" | tee -a "$REC"
+    echo "merge $name merge=$merge" | tee -a "$REC"
 done < "$RUNS_FILE"
 echo "record $REC; monitor: squeue -u \$USER; per-job exit: grep -H Exit: $RUNS/*.out"

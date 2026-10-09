@@ -488,12 +488,16 @@ def job_close(job_dir: Path) -> dict:
     return result
 
 
+def _code_paths(code_dir: Path) -> list[tuple[str, Path]]:
+    """Every file below `code_dir`, by path relative to it; Python's bytecode caches excepted,
+    which every import in a job writes there."""
+    return [(str(p.relative_to(code_dir)), p) for p in sorted(code_dir.rglob("*"))
+            if p.is_file() and not p.is_symlink() and "__pycache__" not in p.relative_to(code_dir).parts]
+
+
 def code_files(code_dir: Path) -> dict[str, dict]:
-    """Size and SHA-256 of every file below `code_dir`, by path relative to it; Python's bytecode
-    caches excepted, which every import in a job writes there."""
-    return {str(p.relative_to(code_dir)): {"size": p.stat().st_size, "sha256": digest(p)}
-            for p in sorted(code_dir.rglob("*"))
-            if p.is_file() and not p.is_symlink() and "__pycache__" not in p.relative_to(code_dir).parts}
+    """Size and SHA-256 of every file below `code_dir` (see _code_paths)."""
+    return {rel: {"size": p.stat().st_size, "sha256": digest(p)} for rel, p in _code_paths(code_dir)}
 
 
 def record_code_files(job_dir: Path) -> int:
@@ -618,11 +622,14 @@ def job_outputs(cfg: Config, job: Path) -> list[str]:
             out.append(f"code/ (no {CODE_FILES}: what the run wrote there cannot be told from the staged code)")
         else:
             staged = json.loads(recorded.read_text())
-            for rel, meta in code_files(code).items():
-                path = Path(rel)
-                if path.parent == Path(cfg.records) and path.suffix == ".json":
+            for rel, path in _code_paths(code):
+                if Path(rel).parent == Path(cfg.records) and Path(rel).suffix == ".json":
                     continue
-                if staged.get(rel) != meta:
+                # A new file or one of another size is output without reading it (run outputs can
+                # be large, and the share is slow); one of the recorded size is hashed, since a
+                # change can keep the size.
+                was = staged.get(rel)
+                if was is None or was["size"] != path.stat().st_size or was["sha256"] != digest(path):
                     out.append(f"code/{rel}")
     model = job / "model"
     if model.is_dir():
@@ -644,6 +651,13 @@ def _deletable(cfg: Config, job: Path, include_outputs: bool) -> str | None:
         require_closed(job / "db" / STEM)
     except Refused as err:
         return f"database not closed: {err}"
+    # A merge reads a copy of the job's database made inside the job folder: one not closed is a
+    # merge running (on any host) or one that died, and deleting the folder would pull it away.
+    for src in sorted(job.glob("merge_src_*")):
+        try:
+            require_closed(src / STEM)
+        except Refused as err:
+            return f"a merge from it is running or did not finish ({src.name} not closed): {err}"
     outputs = job_outputs(cfg, job)
     if outputs and not include_outputs:
         return (f"holds files a run wrote: {_listed(outputs)} (copy out what is needed, GDX in model/output "
@@ -704,8 +718,8 @@ def cleanup_plan(cfg: Config, area: str, main: str, root: Path | None = None,
 def discard_check(cfg: Config, area: str, name: str, root: Path | None = None,
                   include_outputs: bool = False) -> Path:
     """The job copy <area>/jobs/<name>, refusing unless it may be deleted whatever its merges:
-    closed by its job, its database closed, its records collected, and no output a run wrote
-    (unless `include_outputs`). For a copy the user decided is not needed (a failed run, a
+    closed by its job, its database and every merge's copy of it (merge_src_*) closed, its
+    records collected, and no output a run wrote (unless `include_outputs`). For a copy the user decided is not needed (a failed run, a
     merge that will never be made)."""
     job = area_root(area, cfg, root) / COPY_KINDS["job"] / require_name(name)
     if not job.is_dir():

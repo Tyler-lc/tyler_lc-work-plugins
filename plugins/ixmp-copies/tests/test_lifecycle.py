@@ -170,7 +170,7 @@ def test_submit_merges_resubmits_only_what_is_missing(project, tmp_path):
     assert submitted["sb"].split("|")[3] == "Canning problem (MESSAGE scheme)"  # the record's model
     for name, why in (("a_1", "merge 2 is COMPLETED"), ("c_5", "merge 6 is PENDING"), ("d_7", "run 7 is FAILED"),
                       ("e_9", "no result.json"), ("f_11", "merge 20 is COMPLETED"), ("h_15", "merge 16 is PENDING"),
-                      ("i_17", "merge 18 exited 4 (failed after its backup): restore first")):
+                      ("i_17", "merge 18 exited 4 (failed after its backup): check the main")):
         assert f"skip {name}: " in out.stdout and why in out.stdout, (name, out.stdout)
     assert "remerge b_3 run=3 merge=101" in rec.read_text()
 
@@ -334,3 +334,99 @@ def test_collect_updates_a_submission_record_that_grew(project, tmp_path):
     rec.write_text("rewritten\n")  # not an extension of what was collected: never overwritten
     clash = stage.collect(cfg, hd / "ixmp_test")
     assert clash["conflicts"] and (cfg.records_dir / rec.name).read_text().endswith("merge=5\n")
+
+
+def test_a_merge_source_not_closed_keeps_the_job(project, tmp_path):
+    """A merge copies the job's database to merge_src_<time>/ inside the job folder and opens that copy:
+    while it is open (a merge running on another host) or left open (a merge that died), neither
+    cleanup nor --discard deletes the folder. A closed merge source is no obstacle."""
+    cfg, hd = project
+    area, job = _area(cfg, hd, tmp_path)
+    merging = job("merging_1", expected=["s"])
+    _record(cfg, merging, "s")
+    src = merging / "merge_src_20261009_120000"
+    fake_db(src, modified="yes")
+    Path(f"{src / 'db'}.lck").write_text("x")
+    done = job("done_2", expected=["s"])
+    _record(cfg, done, "s")
+    fake_db(done / "merge_src_20261009_110000")  # an earlier merge, finished: closed
+    plan = dbc.cleanup_plan(cfg, "test", "results")
+    assert [j.name for j, _ in plan["delete"]] == ["done_2"]
+    kept = dict((j.name, why) for j, why in plan["keep"])["merging_1"]
+    assert "merge_src_20261009_120000 not closed" in kept and ".lck" in kept, kept
+    with pytest.raises(Refused, match="a merge from it is running or did not finish"):
+        dbc.discard_check(cfg, "test", merging.name, include_outputs=True)
+    out = run_cli(["cleanup", "--area", "test", "--discard", merging.name, "--reason", "x", "--apply"], cfg.project_root)
+    assert out.returncode == 3 and merging.exists(), out.stdout + out.stderr
+    half = done / "merge_src_20261009_130000.partial"  # a copy being made: no properties yet
+    half.mkdir()
+    Path(f"{half / 'db'}.data").write_bytes(b"x")
+    assert "not closed" in dict((j.name, w) for j, w in dbc.cleanup_plan(cfg, "test", "results")["keep"])["done_2"]
+
+
+def test_cleanup_reads_only_what_it_must_of_a_code_copy(project, tmp_path, monkeypatch):
+    """New files and files whose size changed are output without being hashed (a run's outputs can be
+    large and the share slow); a file of the recorded size is hashed, so a change keeping the size is
+    still found."""
+    cfg, hd = project
+    area, job = _area(cfg, hd, tmp_path)
+    j = job("j_1", code=True)
+    (j / "code" / "pkg" / "big_output.csv").write_text("x" * 10_000)
+    (j / "code" / "pkg" / "more.txt").write_text("new")
+    hashed = []
+    real = dbc.digest
+    monkeypatch.setattr(dbc, "digest", lambda path: hashed.append(Path(path).name) or real(path))
+    assert dbc.job_outputs(cfg, j) == ["code/pkg/big_output.csv", "code/pkg/more.txt"]
+    assert hashed == ["run.py"], hashed  # the only file of its recorded size
+    (j / "code" / "pkg" / "run.py").write_text("print('stAged')\n")  # same size, other bytes
+    assert "code/pkg/run.py" in dbc.job_outputs(cfg, j)
+    (j / "code" / "pkg" / "run.py").write_text("print('staged, longer')\n")
+    hashed.clear()
+    assert "code/pkg/run.py" in dbc.job_outputs(cfg, j) and hashed == [], hashed
+
+
+def test_submit_merges_resubmits_a_merge_that_exited_4_only_when_told(project, tmp_path):
+    """A merge that exited 4 is skipped (the main may hold what it made) until the user, having checked
+    the main, names the run in FORCE_RUNS; naming a run whose merge did not exit 4 changes nothing.
+    The record is in the form of 0.4.1: a run line, then its merge's line."""
+    cfg, hd = project
+    _git_project(cfg)
+    code = Path(stage.stage(cfg, "test", [], local_remote))
+    area, job = _area(cfg, hd, tmp_path)
+    jobs = {n: job(n) for n in ("a_1", "b_3")}
+    (area / "runs").mkdir()
+    rec = area / "runs" / "submitted_batch_into_results_1.txt"
+    rec.write_text("\n".join([
+        f"batch batch seed {area}/seeds/s main {area}/mains/results code {code} runs_file x",
+        f"run a_1 job=1 dir={jobs['a_1']} scenario=sa model=m cmd=python a.py merge=9",  # merge exited 4
+        "merge a_1 merge=2",
+        f"run b_3 job=3 dir={jobs['b_3']} scenario=sb model=m cmd=x",  # merged
+        "merge b_3 merge=4"]) + "\n")
+    fake = tmp_path / "fake"
+    (fake / "bin").mkdir(parents=True)
+    (fake / "next").write_text("100")
+    (fake / "states").write_text("1 COMPLETED\n2 FAILED 4:0\n3 COMPLETED\n4 COMPLETED\n9 COMPLETED\n")
+    for name, text in (("sbatch", FAKE_SBATCH), ("sacct", FAKE_SACCT)):
+        (fake / "bin" / name).write_text(text)
+        (fake / "bin" / name).chmod(0o755)
+    env = {"HOME": str(Path.home()), "PATH": f"{fake / 'bin'}:/usr/bin:/bin", "FAKE": str(fake), "CODE": str(code)}
+
+    def submit(**extra):
+        return subprocess.run(["bash", str(code / ".ixmp_copies/slurm/submit_merges.sh"), str(rec)],
+                              capture_output=True, text=True, env={**env, **extra})
+
+    plain = submit()
+    assert plain.returncode == 0 and "skip a_1: merge 2 exited 4" in plain.stdout, plain.stdout + plain.stderr
+    assert "FORCE_RUNS=a_1" in plain.stdout and "skip b_3: merge 4 is COMPLETED" in plain.stdout, plain.stdout
+    assert not (fake / "sbatch.log").exists()
+    other = submit(FORCE_RUNS="b_3 x_9")
+    assert "skip a_1: merge 2 exited 4" in other.stdout and "skip b_3: merge 4 is COMPLETED" in other.stdout
+    assert not (fake / "sbatch.log").exists()
+    forced = submit(FORCE_RUNS="z_0 a_1")
+    assert forced.returncode == 0, forced.stdout + forced.stderr
+    log = (fake / "sbatch.log").read_text().splitlines()
+    assert len(log) == 1 and log[0].split("|")[1:3] == [str(jobs["a_1"]), "sa"], log
+    assert "remerge a_1 run=1 merge=101 forced" in rec.read_text()
+    (fake / "states").write_text((fake / "states").read_text() + "101 COMPLETED\n")
+    after = submit(FORCE_RUNS="a_1")  # the forced merge is now the latest: completed, skipped
+    assert "skip a_1: merge 101 is COMPLETED" in after.stdout and len((fake / "sbatch.log").read_text().splitlines()) == 1

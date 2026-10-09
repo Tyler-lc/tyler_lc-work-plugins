@@ -6,13 +6,23 @@
 #
 # CODE may be a newer snapshot than the batch's (one with the fix). For every run in the record
 # that has a scenario to merge: skipped if its latest merge job completed or is still queued or
-# running, or exited 4 (failed after its backup: the main may hold a partial version, restore it
-# from the backup that merge's log names first); merged now if the run COMPLETED and its job
-# closed its copy (result.json); merged after it (afterok) if the run is still PENDING or
-# RUNNING; otherwise listed and skipped. Merges into the main run one at a time (one job name,
+# running, or exited 4 (see below); merged now if the run COMPLETED and its job closed its copy
+# (result.json); merged after it (afterok) if the run is still PENDING or RUNNING; otherwise
+# listed and skipped. Merges into the main run one at a time (one job name,
 # --dependency=singleton). Safe to repeat: the tool refuses a merge already made. The model is
-# the record's (model=...); MODEL, for records that carry none. Optional env: MERGE_OPTS (extra
-# sbatch options). Appends what it did to the record.
+# the record's (model=...); MODEL, for records that carry none. The latest merge of a run is the
+# last of its `run` line (0.4.0 and before), `merge` lines and `remerge` lines.
+#
+# A merge that exited 4 failed after its pre-merge backup: the main may hold what that merge
+# made. Check the main first (job_backup_main.do and a restore on the workstation, or a read job
+# on a seed made from a backup of the main). If a version of the scenario carries that merge's
+# marker (scenario meta), the clone landed and a resubmission is refused by the marker; check
+# that version by hand, since its merge record was never written. If none does, the merge did
+# not land: resubmit it with FORCE_RUNS="NAME ..." (the runs' names, space-separated). A version
+# a failed clone left half-made carries no marker: note its number, it stays. The tool does not
+# restore a main in place, by design: the backup that merge's log names is a copy to read, or to
+# restore elsewhere.
+# Optional env: FORCE_RUNS, MERGE_OPTS (extra sbatch options). Appends what it did to the record.
 set -euo pipefail
 : "${CODE:?}"
 REC="${1:?submission record}"
@@ -41,14 +51,18 @@ field() { echo " $1" | grep -o " $2=[^ ]*" | head -1 | cut -d= -f2- || true; }
     [ -n "$scenario" ] || continue
     run=$(field "$head" job); dir=$(field "$head" dir)
     # The latest merge of this run: a resubmission's line, else the original one.
-    last=$(grep -E "^(remerge $name |run $name )" "$REC" | sed 's/ cmd=.*//; s/ model=.*//' | grep -o ' merge=[0-9]*' | tail -1 | cut -d= -f2 || true)
+    last=$(grep -E "^(remerge $name |run $name |merge $name )" "$REC" | sed 's/ cmd=.*//; s/ model=.*//' | grep -o ' merge=[0-9]*' | tail -1 | cut -d= -f2 || true)
+    forced=""
     if [ -n "$last" ]; then
         case "$(state "$last")" in
             COMPLETED|PENDING|RUNNING) echo "skip $name: merge $last is $(state "$last")"; continue ;;
         esac
         if [ "$(exitcode "$last")" = "4:0" ]; then
-            echo "skip $name: merge $last exited 4 (failed after its backup): restore first, from the backup its log names"
-            continue
+            case " ${FORCE_RUNS:-} " in
+                *" $name "*) forced=" forced"; echo "$name: merge $last exited 4; resubmitting, as FORCE_RUNS asks" ;;
+                *) echo "skip $name: merge $last exited 4 (failed after its backup): check the main, then" \
+                       "FORCE_RUNS=$name if the merge did not land (this script's header)"; continue ;;
+            esac
         fi
     fi
     case "$(state "$run")" in
@@ -64,5 +78,5 @@ field() { echo " $1" | grep -o " $2=[^ ]*" | head -1 | cut -d= -f2- || true; }
     merge=$(CODE="$CODE" MAIN="$MAIN" SRC_JOB="$dir" SCENARIO="$scenario" MODEL="$model" VERSION="" \
         sbatch --parsable --export=ALL --partition="$IXC_PARTITION" --job-name="merge_into_$MAIN_NAME" \
         "${dep[@]}" ${MERGE_OPTS:-} "$D/job_merge.do")
-    echo "remerge $name run=$run merge=$merge" | tee -a "$REC"
+    echo "remerge $name run=$run merge=$merge$forced" | tee -a "$REC"
 done
