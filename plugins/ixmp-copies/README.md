@@ -54,7 +54,7 @@ and never script around a refusal (exit 3): report it.
 
 ```
 ixmp-copies init | platform-add | doctor | where
-ixmp-copies backup | restore | verify | seed | stage | collect | transfer
+ixmp-copies backup | restore | verify | seed | stage | collect | cleanup | transfer
 ixmp-copies job-copy | job-check | job-close | merge        # inside jobs, via the templates
 ```
 

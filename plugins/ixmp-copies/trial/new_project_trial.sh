@@ -9,8 +9,11 @@
 # ixmp config is never touched), with a local platform holding message_ix's Dantzig model,
 # and goes through everything a new project does: init, platform-add, doctor, backup, stage;
 # on the cluster a seed, a results main, two solves in parallel (one re-solving `standard`, one
-# making `standard_b`), each on its own copy, and their merges; then collect. It writes on the
-# H drive only below ixmp_copies/trial_<time>/. Exit 0 when every step and check passed.
+# making `standard_b`), each on its own copy, and their merges; a third solve whose merge is
+# cancelled and recovered with submit_merges.sh; a scenario made on the workstation afterwards,
+# merged from a newer seed with job_merge_from_seed.do; then collect, and cleanup of the merged
+# job copies. It writes on the H drive only below ixmp_copies/trial_<time>/. Exit 0 when every
+# step and check passed.
 set -euo pipefail
 WORK="${1:?WORKDIR (new or empty)}"; VENV="${2:?CLUSTER_VENV, e.g. ~/repos/.venv}"
 PLUGIN="$(cd "$(dirname "$0")/.." && pwd)"
@@ -47,6 +50,9 @@ cat > runs.txt <<'EOF'
 # NAME SCENARIO COMMAND
 solve_a standard python solve.py standard
 solve_b standard_b python solve.py standard_b
+EOF
+cat > runs_late.txt <<'EOF'
+solve_c standard_c python solve.py standard_c
 EOF
 ixc init --name "$NAME" --platform "$PLATFORM" --model "$MODEL" --venv "$VENV"
 # Small model, small jobs: the heaps come from the config, the job sizes from RUN_OPTS below.
@@ -103,6 +109,41 @@ ids=$(echo "$out" | grep -o -E '(job|merge)=[0-9]+' | cut -d= -f2 | paste -sd,)
 wait_for "$ids"
 remote "grep -H '^Exit:' $AREA/runs/*.out"
 
+say "a third solve whose merge is cancelled, recovered with submit_merges.sh"
+late=$(remote "cd $CODE && CODE=$CODE AREA=test RUN_OPTS='$SMALL' MERGE_OPTS='$SMALL' bash $CODE/.ixmp_copies/slurm/submit_runs.sh $AREA/seeds/seed1 $AREA/mains/results $CODE/runs_late.txt")
+echo "$late"
+run_c=$(echo "$late" | grep -o 'job=[0-9]*' | head -1 | cut -d= -f2)
+merge_c=$(echo "$late" | grep -o 'merge=[0-9]*' | head -1 | cut -d= -f2)
+record_c=$(echo "$late" | grep -o 'record [^;]*' | cut -d' ' -f2)
+remote "scancel $merge_c"
+wait_for "$run_c"
+again=$(remote "cd $AREA/runs && CODE=$CODE MERGE_OPTS='$SMALL' bash $CODE/.ixmp_copies/slurm/submit_merges.sh $record_c")
+echo "$again"
+remerge=$(echo "$again" | grep -o 'remerge solve_c run=[0-9]* merge=[0-9]*' | grep -o 'merge=[0-9]*' | cut -d= -f2)
+[ -n "$remerge" ] || { echo "submit_merges.sh resubmitted nothing" >&2; exit 1; }
+wait_for "$remerge"
+repeat=$(remote "cd $AREA/runs && CODE=$CODE bash $CODE/.ixmp_copies/slurm/submit_merges.sh $record_c")
+echo "$repeat"
+echo "$repeat" | grep -q "skip solve_c: merge $remerge is COMPLETED" || { echo "a repeat resubmitted again" >&2; exit 1; }
+
+say "a scenario made on the workstation after the main, merged from a newer seed"
+python - "$PLATFORM" <<'EOF'
+import sys
+
+import ixmp
+import message_ix
+
+mp = ixmp.Platform(sys.argv[1])
+message_ix.Scenario(mp, "Canning problem (MESSAGE scheme)", "standard").clone(scenario="standard_extra").set_as_default()
+mp.close_db()
+EOF
+ixc backup --apply
+BACKUP2=$(ls -d "$LOCAL_ROOT/ixmp_copies/$NAME/backups/$PLATFORM"/*/ | tail -n 1)
+seed2=$(remote "$mkdir_runs && CODE=$CODE AREA=test NAME=seed2 BACKUP=$REMOTE_ROOT/${BACKUP2#"$LOCAL_ROOT"/} sbatch --parsable --export=ALL $CODE/.ixmp_copies/slurm/job_seed.do")
+wait_for "$seed2"
+from_seed=$(remote "$mkdir_runs && CODE=$CODE AREA=test SEED=$AREA/seeds/seed2 MAIN=$AREA/mains/results SCENARIOS=standard_extra sbatch --parsable --export=ALL $SMALL --job-name=merge_into_results --dependency=singleton $CODE/.ixmp_copies/slurm/job_merge_from_seed.do")
+wait_for "$from_seed"
+
 say "collect, and check the records"
 ixc collect --area test
 python - "$PROJECT/ixmp_copies_records" <<'EOF'
@@ -111,12 +152,22 @@ import sys
 from pathlib import Path
 
 records = sorted(Path(sys.argv[1]).glob("merge_results_*.json"))
-assert len(records) == 2, records
-for path in records:
-    r = json.loads(path.read_text())
-    assert r["compare"]["ok"] and r["set_default"] and r["compare"]["solved"] == [True, True], path
-    assert r["model_source"]["fingerprint"], path
-    print(f"{r['scenario']}: job v{r['source_version']} -> main v{r['merged_version']}, OBJ {r['compare']['OBJ'][1]}, "
+by_scenario = {json.loads(p.read_text())["scenario"]: json.loads(p.read_text()) for p in records}
+assert len(records) == 4 and sorted(by_scenario) == ["standard", "standard_b", "standard_c", "standard_extra"], records
+for name, r in by_scenario.items():
+    solved = name != "standard_extra"  # cloned on the workstation from the unsolved model
+    assert r["compare"]["ok"] and r["set_default"] and r["compare"]["solved"] == [solved, solved], name
+    assert r["model_source"]["fingerprint"], name
+    print(f"{name}: job v{r['source_version']} -> main v{r['merged_version']}, OBJ {r['compare']['OBJ'][1]}, "
           f"GAMS {str(r['model_source']['git_commit'])[:10]} {r['model_source']['fingerprint'][:12]}")
 EOF
+
+say "cleanup of the merged job copies"
+ixc cleanup --area test --main results
+ixc cleanup --area test --main results --apply
+LOCAL_AREA="$LOCAL_ROOT/ixmp_copies/$NAME/test"
+left=$(ls -A "$LOCAL_AREA/jobs")
+[ -z "$left" ] || { echo "job copies left after cleanup: $left" >&2; exit 1; }
+ixc verify "$LOCAL_AREA/seeds/seed1"
+ixc verify "$LOCAL_AREA/seeds/seed2"
 say "TRIAL PASSED: project $PROJECT, H-drive area $AREA"

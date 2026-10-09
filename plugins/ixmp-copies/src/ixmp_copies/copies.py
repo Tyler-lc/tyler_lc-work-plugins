@@ -44,6 +44,8 @@ STEM = "db"
 # A job copy runs one job; a main collects merged results and outlives the jobs.
 COPY_KINDS = {"job": "jobs", "main": "mains"}
 NAME = re.compile(r"^[a-z0-9][a-z0-9_]*$")
+# A job that merges several scenarios lists them here, so cleanup can tell one that failed.
+EXPECTED_MERGES = "expected_merges.txt"
 # GAMS scratch folders (225a, 225b, ...), listings, logs and GDX files are run output, not
 # model source; a job's model folder starts without them.
 MODEL_IGNORE = shutil.ignore_patterns("225*", "*.lst", "*.log", "*.gdx", "*.~*")
@@ -431,3 +433,79 @@ def job_close(job_dir: Path) -> dict:
               "closed": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     write_new(job_dir / "result.json", json.dumps(result, indent=2))
     return result
+
+
+def merge_records(cfg: Config, area_dir: Path) -> list[dict]:
+    """Every merge record that merges wrote: in the area's code snapshots, where merge jobs run,
+    and in the project's records folder, where `collect` brings them. Each carries `_path`."""
+    paths = [*area_dir.glob(f"code/*/{cfg.records}/merge_*.json"), *cfg.records_dir.glob("merge_*.json")]
+    records = []
+    for path in paths:
+        record = json.loads(path.read_text())
+        records.append({**record, "_path": str(path)})
+    return records
+
+
+def within_area(path: str, area_folder: str) -> str | None:
+    """The part of `path` below the area folder ("jobs/x_12", "mains/m/db/db"), whichever
+    machine wrote it: records carry the cluster's spelling of the share, a workstation has its
+    own. None when the path does not pass through that area folder."""
+    parts, area = Path(path).parts, Path(area_folder).parts
+    for i in range(len(parts) - len(area), -1, -1):
+        if parts[i:i + len(area)] == area:
+            return "/".join(parts[i + len(area):])
+    return None
+
+
+def cleanup_plan(cfg: Config, area: str, main: str, root: Path | None = None) -> dict[str, list]:
+    """Which job copies below <area>/jobs/ may be deleted: those whose job closed them and for
+    which a merge record shows the job's scenario merged into <area>/mains/<main> with its
+    comparison passing. Everything else is kept, with the reason. The evidence is the merge
+    record (written only after a merge's clone and comparison), not a read of the main, which
+    would need a JVM and the main closed."""
+    area_dir = area_root(area, cfg, root)
+    main_db = area_dir / COPY_KINDS["main"] / require_name(main) / "db" / STEM
+    if not Path(f"{main_db}.properties").exists():
+        raise Refused(f"no results main {main!r} in {area_dir / COPY_KINDS['main']}")
+    main_rel = f"{COPY_KINDS['main']}/{main}/db/{STEM}"
+    by_job: dict[str, list[dict]] = {}
+    for record in merge_records(cfg, area_dir):
+        job_rel = within_area(record.get("job_dir", ""), cfg.areas[area])
+        if job_rel:
+            by_job.setdefault(job_rel, []).append(record)
+    plan: dict[str, list] = {"delete": [], "keep": []}
+    jobs = area_dir / COPY_KINDS["job"]
+    for job in sorted(p for p in jobs.iterdir() if p.is_dir()) if jobs.is_dir() else []:
+        if not (job / "result.json").exists():
+            plan["keep"].append((job, "not closed (running, failed or cancelled)"))
+            continue
+        try:
+            require_closed(job / "db" / STEM)
+        except Refused as err:
+            plan["keep"].append((job, f"database not closed: {err}"))
+            continue
+        records = by_job.get(f"{COPY_KINDS['job']}/{job.name}", [])
+        good = [r for r in records if within_area(r.get("into_db", ""), cfg.areas[area]) == main_rel
+                and r.get("compare", {}).get("ok")]
+        bad = [r["_path"] for r in records if r not in good]
+        expected_file = job / EXPECTED_MERGES
+        expected = set(expected_file.read_text().split()) if expected_file.exists() else set()
+        missing = sorted(expected - {r["scenario"] for r in good})
+        if not records:
+            plan["keep"].append((job, f"no merge record into {main}"))
+        elif bad:
+            plan["keep"].append((job, f"a merge went elsewhere or its comparison failed: {bad}"))
+        elif missing:
+            plan["keep"].append((job, f"no merge record yet for {missing}"))
+        else:
+            plan["delete"].append((job, [r["_path"] for r in good]))
+    return plan
+
+
+def cleanup_apply(plan: dict[str, list]) -> list[str]:
+    """Delete the job copies the plan marks for deletion; returns their paths."""
+    deleted = []
+    for job, _ in plan["delete"]:
+        shutil.rmtree(job)
+        deleted.append(str(job))
+    return deleted

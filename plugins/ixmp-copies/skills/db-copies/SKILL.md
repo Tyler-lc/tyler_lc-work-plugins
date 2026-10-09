@@ -65,6 +65,44 @@ prints any of them as the current machine sees the share.
 A chain (solve A, seed from A's closed copy, solve B..N from that seed) is `job_seed.do` with
 `SRC_JOB=<A's job dir>` and `--dependency=afterok:<A>`, then `submit_runs.sh` with `AFTER=<seed job>`.
 
+## When merges did not happen
+
+- **A merge failed or was cancelled** (a bug since fixed, a lost node): from the login node,
+  `CODE=<snapshot> bash $CODE/.ixmp_copies/slurm/submit_merges.sh <area>/runs/submitted_*.txt`.
+  It reads the batch's submission record and resubmits only what is missing: it skips runs whose
+  latest merge completed or is still queued, merges finished runs now and still-running ones
+  after them, and skips failed runs. `CODE` may be a newer snapshot with the fix. Safe to
+  repeat: the tool refuses a merge already made.
+- **Scenarios exist only in a seed** (built on the workstation after the main was made): back up,
+  seed, then `job_merge_from_seed.do` with `SEED`, `MAIN`, `SCENARIOS="name name:version ..."`.
+  Give it the main's merge job name (`--job-name=merge_into_<main>`) and
+  `--dependency=singleton` when other merges into that main may run.
+
+## Getting results out
+
+Everything is read from the results main, never job by job: each job copy only feeds its merge.
+
+- **On the workstation, one database:** on the cluster, `job_backup_main.do` (`NAME=<main>`); then
+  `ixmp-copies restore --from <that backup> --dest ~/ixmp_local/<name> --apply` and
+  `ixmp-copies platform-add --name <name> --dir ~/ixmp_local/<name> --apply`. Read or report the
+  runs one per process from that platform. What you write there (e.g. reported timeseries)
+  exists only in that copy.
+- **On the cluster, in parallel:** seed from a backup of the main, then `submit_runs.sh` (or
+  `job_run.do`) with read commands and scenario `-` (no merge). Each job reads its own copy; have
+  the commands write files into the job's code copy (`collect` brings `.json` records home) or
+  into `$IXC_JOB_DIR`, then copy them to the workstation.
+
+## Cleaning up
+
+Job copies are full databases and stay on the H drive until deleted.
+`ixmp-copies cleanup --area A --main NAME` lists each job copy with a verdict; `--apply` deletes
+those a merge record proves merged into `<area>/mains/NAME` with its comparison passing, and only
+when every record for that job passed and every scenario the job was meant to merge
+(`expected_merges.txt`, written by `submit_runs.sh` and `job_merge_from_seed.do`) has one. Kept:
+open or failed jobs, jobs without a record, jobs whose merge failed or went elsewhere. Merge
+records are read from the area's snapshots and from the project's records folder. Seeds, mains
+and backups are never touched; delete those by decision, not by tool.
+
 ## Exit codes
 
 0 done; 3 refused, nothing changed; 2 a copy does not match its source, `verify` found a

@@ -12,7 +12,7 @@
 # default platform) opens this job's copy and nothing else; IXC_JOB_DIR names the job folder.
 # Records CMD writes inside the code copy are brought home by `ixmp-copies collect`.
 # job-close runs whatever CMD returned, so a solved copy is always recorded.
-# Env: CODE, AREA, SEED, NAME (lower-case [a-z0-9_]), CMD. Pass them through the environment
+# Env: CODE, AREA, SEED, NAME (lower-case [a-z0-9_]), CMD; optional MERGE_SCENARIO. Pass them through the environment
 # with --export=ALL: --export=CMD=... splits the value on commas.
 : "${CODE:?}" "${AREA:?}" "${SEED:?}" "${NAME:?}" "${CMD:?}"
 source "$CODE/.ixmp_copies/slurm/common.sh"
@@ -21,6 +21,8 @@ export JAVA_TOOL_OPTIONS="-Xmx$IXC_HEAP_RUN"
 JOB_DIR="$(ixc where --area "$AREA" jobs)/${NAME}_${SLURM_JOB_ID}"
 echo "run [$CMD] on a copy of $SEED in $JOB_DIR; code $CODE; $(hostname)"
 step ixc job-copy --seed "$SEED" --job-dir "$JOB_DIR" --area "$AREA" || exit 1
+# The scenario this run's merge brings back (submit_runs.sh sets it): cleanup needs its record.
+[ -n "${MERGE_SCENARIO:-}" ] && echo "$MERGE_SCENARIO" > "$JOB_DIR/expected_merges.txt"
 step cp -r "$CODE" "$JOB_DIR/code" || exit 1
 use_code "$JOB_DIR/code"
 mkdir -p "$JOB_DIR/tmp"

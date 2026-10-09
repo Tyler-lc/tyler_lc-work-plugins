@@ -37,7 +37,8 @@ while read -r name scenario cmd; do
     [ -z "$name" ] || [ "${name:0:1}" = "#" ] && continue
     # Values go through the environment (--export=ALL): --export=VAR=value splits on commas.
     # shellcheck disable=SC2086
-    run=$(CODE="$CODE" AREA="$AREA" SEED="$SEED" NAME="$name" CMD="$cmd" \
+    merge_scenario=""; [ "$scenario" != "-" ] && merge_scenario="$scenario"
+    run=$(CODE="$CODE" AREA="$AREA" SEED="$SEED" NAME="$name" CMD="$cmd" MERGE_SCENARIO="$merge_scenario" \
         sbatch --parsable --export=ALL --partition="$IXC_PARTITION" --job-name="$name" "${DEP[@]}" \
         ${RUN_OPTS:-} "$D/job_run.do")
     line="run $name job=$run dir=$JOBS/${name}_${run}"

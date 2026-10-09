@@ -22,6 +22,9 @@ On the workstation:
                                         <area>/code/<sha>/ on the cluster's side (the jobs' CODE)
     collect --area A                    copy the records jobs and merges wrote into the
                                         project's records folder (write-once)
+    cleanup --area A --main NAME [--apply]
+                                        delete the job copies whose scenario a merge record
+                                        shows merged into <area>/mains/NAME; keep the rest
     transfer --from P1 --to P2 --scenario S [--model M] [--version V] [--apply]
                                         copy one scenario across platforms (e.g. ixmp-dev to a
                                         local database, and back), adding the units, regions
@@ -220,6 +223,24 @@ def cmd_collect(args) -> int:
     for c in out["conflicts"]:
         print(f"CONFLICT (not overwritten): {c}", file=sys.stderr)
     return 2 if out["conflicts"] else 0
+
+
+def cmd_cleanup(args) -> int:
+    cfg = config_mod.load()
+    plan = copies.cleanup_plan(cfg, args.area, args.main)
+    for job, reason in plan["keep"]:
+        print(f"keep    {job.name}: {reason}")
+    for job, records in plan["delete"]:
+        print(f"delete  {job.name}: merged ({len(records)} record{'s' if len(records) > 1 else ''})")
+    if not args.apply:
+        print(f"dry run: {len(plan['delete'])} job copies would be deleted; pass --apply")
+        return 0
+    deleted = copies.cleanup_apply(plan)
+    record = _record(cfg, f"cleanup_{args.area}_{args.main}_{time.strftime('%Y%m%d_%H%M%S')}",
+                     {"deleted": {str(j): r for j, r in plan["delete"]},
+                      "kept": {str(j): why for j, why in plan["keep"]}})
+    print(f"deleted {len(deleted)} job copies; record {record}")
+    return 0
 
 
 def cmd_job_copy(args) -> int:
@@ -427,6 +448,7 @@ def parser() -> argparse.ArgumentParser:
     add("stage", cmd_stage, "--area", extra={"action": "append", "default": [],
                                              "help": "PATH, or CHECKOUT:PATH for an untracked file"})
     add("collect", cmd_collect, "--area")
+    add("cleanup", cmd_cleanup, "--area", "--main", apply=apply)
     add("job-copy", cmd_job_copy, "--seed", "--job-dir", "--area", platform={},
         kind={"choices": ("job", "main"), "default": "job"})
     add("job-check", cmd_job_check, "--job-dir", platform={})
