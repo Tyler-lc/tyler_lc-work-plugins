@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.4.0 (2026-10-09)
+
+Fixes from a second cold review of 0.3.0. Do not run `cleanup --apply` with 0.3.0: it deletes
+job copies holding run output in their code or model folders.
+
+- **Merges are tied to the model and scenario.** A merge refuses a run record about another
+  model (`--model` must match what the run marked). The merge marker is now
+  `merged from <source> <model>/<scenario> v<N>`, so seed merges of several scenarios at one
+  version (`SCENARIOS="a:1 b:1"`) no longer refuse each other. `submit_runs.sh` writes the model
+  into each run line of the submission record (`model=...`, last before `cmd=`) and
+  `submit_merges.sh` merges with it.
+- **Seed merges are marked by where the versions came from:** the database the seed's backup
+  copied (new seeds record it as `origin`), or the job copy a seed was made from. The same
+  workstation version merged again through a newer seed is refused.
+- **`run-mark` accepts a solve in place:** the same default version, unsolved before the command
+  and solved after it. It still refuses the same default solved before and after (a re-solve in
+  place cannot be told from a command that did nothing; clone first), and says why.
+- **`cleanup` keeps run output outside the job folder's top level:** new or changed files in the
+  job's code copy (against `code_files.json`, which `job_run.do` now writes right after copying
+  the code; bytecode caches and collected `.json` records aside), and GDX files, listings and GAMS
+  scratch in its model copy (`model/output` holds the equation duals). `--include-outputs`
+  deletes them anyway. Every job that solved has GDX files, so after copying out what is needed,
+  merged solves are deleted with `--include-outputs`.
+- **`cleanup` deletes read jobs** (scenario `-` in a runs file: `job_run.do` writes an empty
+  `expected_merges.txt`) once their records are collected and they hold no output. A job submitted
+  by hand without `MERGE_SCENARIO` is still kept. New: `cleanup --area A --discard JOB --reason
+  TEXT [--apply]` deletes one closed job copy whatever its merges, and records the reason; it
+  refuses an open database, uncollected records and (without `--include-outputs`) run output.
+- `transfer` into a platform registered but never opened (no database files yet) proceeds with
+  nothing to back up, instead of refusing.
+- `submit_runs.sh` reads a last line without a newline. `submit.sh` unsets the templates'
+  variables before applying the given `VAR=value` pairs (an exported `BACKUP` no longer reaches a
+  `SRC_JOB` seed job), and makes only `BACKUP`, `SEED`, `MAIN` and `SRC_JOB` absolute.
+  `job_seed.do` refuses both `BACKUP` and `SRC_JOB`.
+- `submit_merges.sh` finds the main of a batch named `main`, skips a merge whose last attempt
+  exited 4 ("restore first"), and no longer exits 1 on a record without run lines.
+- A command line the tool does not accept exits 3 (refused), not argparse's 2.
+- `doctor` checks that the share reached here is the cluster's (top-level names of both roots)
+  and that `[cluster] partition` exists (`sinfo`).
+- SETUP: the H drive mounted on first access by systemd (`x-systemd.automount`, with a
+  `~/hdrive` symlink), the plain mount as fallback. README: how to run the tests.
+
+Upgrade from 0.3.0:
+- Batches started under 0.2.0 have no run record (`run_result.json`): remerge them with a 0.2.0
+  snapshot, or by hand with `merge --version N` after checking which version the run made.
+- Versions merged under 0.3.0 carry the old marker; 0.4.0 still recognises it for the same
+  scenario (on the main and in merge records), so repeats stay refused.
+- Job copies made under 0.3.0 have no `code_files.json`: `cleanup` counts their code copy as
+  output and keeps them until `--include-outputs`. Their read jobs have no `expected_merges.txt`:
+  delete those with `--discard`.
+- Submission records of 0.3.0 name no model: `submit_merges.sh` uses `MODEL` from the
+  environment, else `[project] model`.
+
+Verified: 86 tests (offline, fake `sbatch`/`sacct`/`ssh`/`sinfo`, and real-HyperSQL tests with a
+JVM, one of which solves the Dantzig model in place with a local GAMS), each new test confirmed
+to fail against 0.3.0. The cluster trial of 0.4.0 (extended with a solve in place and read jobs
+with and without output) has not run yet.
+
 ## 0.3.0 (2026-10-09)
 
 Fixes from a cold review of 0.2.0. Upgrade from 0.2.0: in `ixmp_copies.toml`, add
