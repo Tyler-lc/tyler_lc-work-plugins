@@ -16,8 +16,18 @@ Claude Code:
 /plugin install ixmp-copies@tyler_lc-work-plugins
 ```
 
+To get a newer version later:
+
+```
+/plugin marketplace update tyler_lc-work-plugins
+/plugin update ixmp-copies@tyler_lc-work-plugins
+```
+
+then restart Claude Code (or `/reload-plugins`).
+
 A plugin that carries a Python tool is also installed into the project's venv; each plugin's
-README says how, and its `SETUP.md` covers first-time setup.
+README says how, and its `SETUP.md` covers first-time setup. Each plugin's `CHANGELOG.md` says
+what changed and what has been verified.
 
 Other agents: clone this repository and point the agent at `plugins/<plugin>/README.md`, which
 links the skill and the setup steps.

@@ -14,6 +14,7 @@ one.
 | File | For |
 |---|---|
 | [`SETUP.md`](SETUP.md) | first-time setup, per person and per project, ending in an end-to-end trial |
+| [`CHANGELOG.md`](CHANGELOG.md) | what changed in each version, how to upgrade, and what was verified |
 | [`skills/db-copies/SKILL.md`](skills/db-copies/SKILL.md) | the procedure: the chain, running a batch, refusals, exit codes, limits |
 | `src/ixmp_copies/` | the tool (`ixmp-copies --help`); `slurm/` inside it holds the job templates |
 | `trial/new_project_trial.sh` | the acceptance trial a new setup must pass |
