@@ -437,13 +437,14 @@ def job_close(job_dir: Path) -> dict:
 
 def merge_records(cfg: Config, area_dir: Path) -> list[dict]:
     """Every merge record that merges wrote: in the area's code snapshots, where merge jobs run,
-    and in the project's records folder, where `collect` brings them. Each carries `_path`."""
+    and in the project's records folder, where `collect` brings them. A record is write-once and
+    named uniquely, so a name found in both places is one record, counted once. Each carries
+    `_path`."""
     paths = [*area_dir.glob(f"code/*/{cfg.records}/merge_*.json"), *cfg.records_dir.glob("merge_*.json")]
-    records = []
+    records: dict[str, dict] = {}
     for path in paths:
-        record = json.loads(path.read_text())
-        records.append({**record, "_path": str(path)})
-    return records
+        records.setdefault(path.name, {**json.loads(path.read_text()), "_path": str(path)})
+    return list(records.values())
 
 
 def within_area(path: str, area_folder: str) -> str | None:

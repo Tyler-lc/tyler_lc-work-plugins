@@ -42,6 +42,9 @@ Copies, seeds and job folders live on the H drive. On UniCC it is `/hdrive/all_u
 (`<file server>/<your home share>` is the UNC path Windows shows for your H drive, with `/` for
 `\`; `.smbcred` is a root-only file with `username=` and `password=`). The mount needs the VPN;
 when the VPN drops, the mount hangs or reports `Host is down`, and the tool refuses to use it.
+WSL does not mount it on its own: after every reboot of the machine, and after the VPN drops,
+mount it again with `sudo mount ~/hdrive`. Until then `~/hdrive` is an empty folder, which
+`ls` happily lists; `doctor` reports it as not reachable.
 Mounted elsewhere, list your mount point first in `[storage] roots`.
 
 ## 3. A Python environment on the cluster

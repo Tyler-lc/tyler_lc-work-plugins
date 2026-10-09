@@ -31,7 +31,8 @@ def _local(cfg: Config) -> list[Check]:
     roots = [r for r in hdrive_candidates(cfg) if reachable(r)]
     out.append(Check("H drive reachable here", "ok" if roots else "FAIL",
                      str(roots[0]) if roots else f"none of {[str(r) for r in hdrive_candidates(cfg)]}",
-                     "connect the VPN; on WSL mount the share (see SETUP.md, step 2); "
+                     "connect the VPN, then mount the share (on WSL after every reboot or VPN drop: "
+                     "sudo mount <mount point>; SETUP.md, step 2); "
                      "or fix [storage] roots"))
     try:
         import ixmp

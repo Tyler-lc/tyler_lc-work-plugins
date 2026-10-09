@@ -73,8 +73,13 @@ def test_cleanup_deletes_only_proven_merges(project, tmp_path):
     _record(cfg, reopened, "s")
     Path(f"{reopened / 'db' / 'db'}.properties").write_text("modified=yes\n")
 
+    snapshot_records = area / "code" / "abc" / cfg.records
+    snapshot_records.mkdir(parents=True)
+    for rec in cfg.records_dir.glob("merge_results_s_merged_1.json"):
+        (snapshot_records / rec.name).write_text(rec.read_text())  # as collect leaves it: in both places
+
     plan = dbc.cleanup_plan(cfg, "test", "results")
-    assert [j.name for j, _ in plan["delete"]] == ["merged_1"]
+    assert [(j.name, len(r)) for j, r in plan["delete"]] == [("merged_1", 1)]
     kept = {j.name: why for j, why in plan["keep"]}
     assert "comparison failed" in kept["failed_2"]
     assert "no merge record" in kept["nomerge_3"]
