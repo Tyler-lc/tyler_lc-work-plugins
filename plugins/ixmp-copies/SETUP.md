@@ -33,21 +33,49 @@ means the connection expired: log in once again.
 
 Copies, seeds and job folders live on the H drive. At IIASA it is always
 `/hdrive/all_users/<IIASA user>` on the cluster (`~/hdrive` there is a symlink to it). On a Linux
-or WSL workstation, mount the same share; mounting it at that same path,
-`/hdrive/all_users/<IIASA user>`, gives every path one spelling on both sides. The default
-`[storage] roots` try that path first and `~/hdrive` second. In `/etc/fstab`:
+or WSL workstation, mount the same share. The default `[storage] roots` try
+`/hdrive/all_users/<IIASA user>` first and `~/hdrive` second, so either mount it at that path
+(every path then has one spelling on both sides) or anywhere else with a symlink `~/hdrive`
+pointing at the mount point. The mount needs the VPN; when the VPN drops, the mount hangs or
+reports `Host is down`, and the tool refuses to use it. `doctor` checks that the share it reaches
+here is the one the cluster sees.
+
+**Recommended: mounted on first access by systemd.** In `/etc/fstab`, one line:
 
 ```
-//<file server>/<your home share> /hdrive/all_users/<IIASA user> cifs credentials=/home/<you>/.smbcred,uid=<uid>,gid=<gid>,_netdev,nofail 0 0
+//<file server>/<your home share> /mnt/iiasa/hdrive cifs credentials=/etc/.smbcredentials,uid=<uid>,gid=<gid>,_netdev,nofail,noauto,x-systemd.automount,x-systemd.idle-timeout=600 0 0
 ```
 
-(`<file server>/<your home share>` is the UNC path Windows shows for your H drive, with `/` for
-`\`; `.smbcred` is a root-only file with `username=` and `password=`). The mount needs the VPN;
-when the VPN drops, the mount hangs or reports `Host is down`, and the tool refuses to use it.
-WSL does not mount it on its own: after every reboot of the machine, and after the VPN drops,
-mount it again with `sudo mount ~/hdrive`. Until then `~/hdrive` is an empty folder, which
-`ls` happily lists; `doctor` reports it as not reachable. Mounted anywhere else, list that
-mount point in `[storage] roots`.
+then
+
+```bash
+sudo mkdir -p /mnt/iiasa/hdrive
+sudo systemctl daemon-reload        # after every edit of /etc/fstab
+ln -s /mnt/iiasa/hdrive ~/hdrive    # where [storage] roots finds it
+```
+
+- `<file server>/<your home share>` is the UNC path Windows shows for your H drive, with `/` for
+  `\`.
+- `/etc/.smbcredentials` holds `username=` and `password=` lines and is readable by root only
+  (`sudo chown root:root /etc/.smbcredentials && sudo chmod 600 /etc/.smbcredentials`).
+- `<uid>` and `<gid>` are your local account's ids (often 1000 and 1000; check with `id`).
+- `/mnt/iiasa/hdrive` is an example; mounting at `/hdrive/all_users/<IIASA user>` instead needs
+  no symlink.
+
+With `x-systemd.automount` the share mounts on first access after every reboot or VPN
+reconnect, with no manual mount. On WSL this needs systemd enabled: in `/etc/wsl.conf`,
+
+```
+[boot]
+systemd=true
+```
+
+then restart WSL (`wsl --shutdown` from Windows).
+
+**Fallback: a plain mount.** The same fstab line without `noauto,x-systemd.automount,x-systemd.idle-timeout=600`
+is mounted by hand: after every reboot of the machine, and after the VPN drops, run
+`sudo mount /mnt/iiasa/hdrive` (or your mount point). Until then the mount point is an empty
+folder, which `ls` happily lists; `doctor` reports it as not reachable.
 
 ## 3. A Python environment on the cluster
 
@@ -111,8 +139,9 @@ ixmp-copies platform-add --apply    # default folder ~/ixmp_local/<platform>; --
 This registers `[project] platform` in your ixmp config with `hsqldb.default_table_type=cached`
 in its url. Without it, older ixmp versions create MEMORY tables, which hold the whole database
 in the JVM and make every open slower as scenarios accumulate (the tool refuses to seed from such
-a database). The database is created on first open; keep it on a local disk, never on the H
-drive. `--dir` may also name an existing database (e.g. one made by `restore`).
+a database). The database is created on first open, which may be the first `transfer` into it
+(step 7); keep it on a local disk, never on the H drive. `--dir` may also name an existing
+database (e.g. one made by `restore`).
 
 ## 7. Scenarios into it
 
@@ -124,8 +153,9 @@ JAVA_TOOL_OPTIONS=-Xmx16g ixmp-copies transfer --from ixmp-dev --to myproject-lo
 
 This adds the units, regions (with synonyms) and time slices the local platform lacks, then
 clones the scenario with its solution and timeseries, and compares the copy (row counts,
-timeseries, objective). A full MESSAGE scenario takes about ten minutes and a 16 GB heap. The
-same command moves results back (`--from myproject-local --to ixmp-dev`).
+timeseries, objective). A HyperSQL target is backed up first, unless its database does not exist
+yet. A full MESSAGE scenario takes about ten minutes and a 16 GB heap. The same command moves
+results back (`--from myproject-local --to ixmp-dev`).
 
 ## 8. Check, then try it
 
@@ -138,9 +168,12 @@ and runs the whole chain on the cluster:
 - a seed and a results main
 - two solves in parallel on their own copies, and their merges
 - a solve that forgets `set_as_default()`: its job fails and nothing is merged
+- a solve in place of the seed's unsolved default version: accepted and merged
 - a merge cancelled on purpose, recovered with `submit_merges.sh`
 - a scenario made on the workstation afterwards, merged from a newer seed
-- `collect`, then `cleanup` of every merged job copy
+- two read jobs (no merge), one of which writes a file into its code copy
+- `collect`, then `cleanup`: first the job copies that hold no run output, then, with
+  `--include-outputs`, those holding GDX files or the read job's file
 
 It needs pytest in the workstation venv (message_ix's test model imports it) and writes on the H
 drive only below `ixmp_copies/trial_<time>/`:

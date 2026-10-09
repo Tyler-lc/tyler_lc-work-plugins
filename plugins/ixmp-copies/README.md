@@ -49,9 +49,10 @@ machine; ask, do not work around them.
    run one real job and merge; it should end with `TRIAL PASSED`.
 
 Then follow the skill for the work itself. A run's command must solve its scenario and call
-`set_as_default()` on the result: the merge brings back exactly the version the run left as
-default, and a run that left none fails. Never copy, move or delete database files by hand, and
-never script around a refusal (exit 3): report it.
+`set_as_default()` on the result (or solve the unsolved default version in place): the merge
+brings back exactly the version the run left as default, and a run that left none fails. Never
+copy, move or delete database files by hand, and never script around a refusal (exit 3): report
+it.
 
 ## Commands
 
@@ -63,11 +64,13 @@ ixmp-copies job-copy | job-check | run-mark | job-close | merge   # inside jobs,
 
 ## Tests
 
-In an environment with ixmp and message_ix:
+From this folder, with the Python of a venv that has ixmp and message_ix:
 
 ```bash
-uv run --with pytest python -m pytest
+PYTHONPATH=src uv run --no-project --python <venv>/bin/python --with pytest python -m pytest
 ```
 
-The integration test builds real HyperSQL databases in a temp folder and needs java; it is
-skipped without it.
+Without ixmp and message_ix, 16 of the 86 tests skip (everything that resolves a platform or
+runs a job script). The integration tests build real HyperSQL databases in a temp folder and need
+java; the one that solves in place also needs `gams` on `PATH`. Each is skipped without what it
+needs.
