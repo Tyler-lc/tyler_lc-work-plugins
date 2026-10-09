@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.4.1 (2026-10-09)
+
+Fixes from a third cold review of 0.4.0.
+
+- **`run-mark` refuses a solve in place beside a forgotten clone.** The same default version,
+  unsolved before and solved after, is accepted as a solve in place only when the run made no
+  other version. A run that solved the seed's default on the way (a base solve), then cloned and
+  solved a new version without `set_as_default()`, now fails its job (`mark 3`) instead of
+  having the base version merged as its result. The refusal for an older version made default
+  now says what it means: such a version cannot be told from one the seed held; clone first, or
+  solve the default in place.
+- **`merge` refuses a run that did not complete** (`run_before.json` without `run_result.json`:
+  the command failed, or `run-mark --after` never ran) whatever the version; it no longer
+  suggests `--version default`, which brought back the seed's version. A deliberate merge by
+  hand of such a job needs `--version N --despite-failed-run`; the merge record keeps the flag.
+  The flag on any other job is refused.
+- **A seed merge refused as made before says how to bring a changed version:** the marker names a
+  version number, so a version solved or edited in place on the workstation since its merge (or
+  a recreated database) must be cloned to a new version and merged as that.
+- **`submit_merges.sh` recovery after exit 4:** a merge that exited 4 stays skipped until
+  `FORCE_RUNS="NAME ..."` names its run, after the user has checked the main (the header and the
+  skill say how). The old advice to restore the main from its backup is gone: the tool does not
+  restore a main in place.
+- **`cleanup` and `--discard` keep a job folder holding a `merge_src_*` copy not closed** (a merge
+  running on another host, or one that died).
+- **`transfer` refuses a target folder that cannot be a new database:** a url whose parent folder
+  is missing too (a typo, a disk not mounted) or a folder holding other files. A new database is
+  one in an empty folder or a missing folder below an existing one.
+- **Submission records:** `submit_runs.sh` writes a run's line as soon as the run is submitted and
+  its merge on a line of its own (`merge NAME merge=ID`), so a failed merge submission leaves the
+  run recorded; the batch stops there and says so. `submit_merges.sh` reads these and the 0.4.0
+  form.
+- `cleanup` reads less of a code copy: new files and files of another size count as output
+  without being read; only files of the recorded size are hashed (a change keeping the size is
+  still found).
+- The trial gains a run that base-solves the seed's `standard`, clones it to v2, solves that and
+  forgets `set_as_default()`: its job must fail with `mark 3` and its merge never run.
+
+Upgrade from 0.4.0: nothing to change. Records written by 0.4.0's `submit_runs.sh` (merge id on
+the run line) are still read. A run job of 0.4.0 that solved in place beside a new version was
+accepted then: check such merges (`run.in_place` true in the merge record, with
+`run.versions` longer than `run.before`).
+
+Verified: 98 tests (20 skip without ixmp and message_ix), each new one confirmed to fail against
+0.4.0, ruff clean, the trial script checked with `bash -n`. The cluster trial of 0.4.1 is pending.
+
 ## 0.4.0 (2026-10-09)
 
 Fixes from a second cold review of 0.3.0. Do not run `cleanup --apply` with 0.3.0: it deletes
