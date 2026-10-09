@@ -44,7 +44,7 @@ accepted then: check such merges (`run.in_place` true in the merge record, with
 `run.versions` longer than `run.before`).
 
 Verified: 98 tests (20 skip without ixmp and message_ix), each new one confirmed to fail against
-0.4.0, ruff clean, the trial script checked with `bash -n`. The cluster trial of 0.4.1 is pending.
+0.4.0, ruff clean, the trial script checked with `bash -n`. The cluster trial passed on UniCC (2026-10-09, `TRIAL PASSED`), including the base solve then unset new version (refused, `mark 3`, its merge never ran).
 
 ## 0.4.0 (2026-10-09)
 
