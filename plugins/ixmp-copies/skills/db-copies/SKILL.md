@@ -65,7 +65,9 @@ wherever it is mounted on the workstation.
    `NAME SCENARIO COMMAND...`. The command runs in the job's code copy with `IXMP_DATA` pointing
    at the job's database, so `ixmp.Platform()` (or the project's platform name) opens that copy
    and nothing else. **The command must call `set_as_default()` on its result** (and solve it):
-   the job records `SCENARIO`'s versions before the command and the default version after it
+   ixmp makes only a new scenario name's first version default by itself, so a run that re-solves
+   an existing name and forgets the call leaves the old version as default. The job records
+   `SCENARIO`'s versions before the command and the default version after it
    (`run-mark`), the job fails when the command left no new version as default, and the merge
    brings back exactly the version the job recorded, refusing an unsolved one unless told
    (`--allow-unsolved`). `SCENARIO` `-` means no merge. `AFTER=<jobid>` makes every run wait for,

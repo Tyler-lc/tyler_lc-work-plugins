@@ -57,7 +57,9 @@ cat > runs.txt <<'EOF'
 solve_a standard python solve.py standard
 solve_b standard_b python solve.py standard_b
 EOF
-echo "solve_f standard_f python solve.py standard_f --no-default" > runs_forgot.txt
+# Re-solving an existing name without set_as_default() leaves the old version as default: the
+# trap. (A new name's first version is made default by ixmp itself.)
+echo "solve_f standard python solve.py standard --no-default" > runs_forgot.txt
 echo "solve_c standard_c python solve.py standard_c" > runs_late.txt
 ixc init --name "$NAME" --platform "$PLATFORM" --model "$MODEL" --venv "$VENV"
 # Small model, small jobs: the heaps come from the config, the job sizes from the sbatch options below.
