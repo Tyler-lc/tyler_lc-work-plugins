@@ -55,8 +55,12 @@ Upgrade from 0.3.0:
 
 Verified: 86 tests (offline, fake `sbatch`/`sacct`/`ssh`/`sinfo`, and real-HyperSQL tests with a
 JVM, one of which solves the Dantzig model in place with a local GAMS), each new test confirmed
-to fail against 0.3.0. The cluster trial of 0.4.0 (extended with a solve in place and read jobs
-with and without output) has not run yet.
+to fail against 0.3.0. The cluster trial passed on UniCC (2026-10-09, `TRIAL PASSED`): a solve in
+place of the seed's unsolved default was accepted and merged; a re-solve that forgot
+`set_as_default()` was refused (`mark 3`); a seed merge's resubmission was refused by the main's
+marker naming the version's origin; cleanup's first pass deleted only the merged seed copy and
+the read job without output, keeping every job that held GDX, listings or a written file, and
+`--include-outputs` then deleted those, keeping the failed run and the refused seed merge.
 
 ## 0.3.0 (2026-10-09)
 
