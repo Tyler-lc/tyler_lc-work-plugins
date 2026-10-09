@@ -25,10 +25,12 @@ in `[storage] roots` (or re-run `init` in a scratch folder and copy the new keys
 - The share is probed with a 10 s timeout. `init` requires `--venv` and records the cluster user;
   `/hdrive/all_users/<user>` is tried first.
 
-Verified: 65 tests (offline, fake `sbatch`/`ssh`, and a real-HyperSQL test with a JVM). The
-new-project trial passed its local steps on 2026-10-09; its cluster steps for 0.3.0 (`submit.sh`,
-`run-mark` in `job_run.do`, seed-merge resubmission) were interrupted by a VPN drop and are
-still to be run.
+Verified: 65 tests (offline, fake `sbatch`/`ssh`, and a real-HyperSQL test with a JVM), and the
+new-project trial on UniCC (2026-10-09, `TRIAL PASSED`): `submit.sh` for seed and main; two
+parallel solves merged; a re-solve that forgot `set_as_default()` failed (`mark 3`) and its merge
+never ran; a cancelled merge recovered by `submit_merges.sh` and the repeat skipped; a seed merge,
+and its resubmission refused by the main's marker; `cleanup` deleted the four merged job copies
+and kept the two that did not merge; both seeds still verify.
 
 ## 0.2.0 (2026-10-08)
 
