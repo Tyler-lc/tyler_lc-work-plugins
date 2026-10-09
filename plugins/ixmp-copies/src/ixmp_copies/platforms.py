@@ -223,20 +223,32 @@ def run_outcome(before: dict, after: dict) -> dict:
     """Whether a run's command left a result a merge can bring back, from scenario_state before
     and after it. Accepted: a default version that was not there before (the command cloned or
     made a new version and set it as default), or the same default version, unsolved before and
-    solved after (solved in place). Not accepted: no default; an older version made default; the
-    same default, unsolved after (nothing solved); the same default, solved before and after,
-    since a re-solve in place cannot be told from a command that did nothing. Returns `after`
-    with the versions before, `new`, `in_place`, `accepted`, and `reason` when not accepted."""
+    solved after, with no other version made (solved in place). Not accepted: no default; an
+    older version made default; the default solved in place beside a new version left
+    non-default (a base solve, then a clone whose set_as_default() was forgotten); the same
+    default, unsolved after (nothing solved); the same default, solved before and after, since a
+    re-solve in place cannot be told from a command that did nothing. Returns `after` with the
+    versions before, `new`, `in_place`, `accepted`, and `reason` when not accepted."""
     default, label = after["default"], f"{after['model']}/{after['scenario']}"
     new = default is not None and default not in before["versions"]
-    in_place = (not new and default is not None and default == before["default"]
-                and not before["solved"] and after["solved"])
+    same_default = not new and default is not None and default == before["default"]
+    solved_now = same_default and not before["solved"] and after["solved"]
+    in_place = solved_now and after["versions"] == before["versions"]
     reason = None
     if default is None:
         reason = f"{label} has no default version after the run: did its command create and set_as_default() it?"
     elif not new and default != before["default"]:
+        # Only the default's solution is recorded before the run: whether the run solved this
+        # version or found it solved, nothing tells.
         reason = (f"the run made v{default} of {label} default, a version that was there before it (the "
-                  f"default was v{before['default']}): the merge brings back the run's own result")
+                  f"default was v{before['default']}): even if the run solved it, its result cannot be told "
+                  "from a version the seed already held. Clone to a new version before solving and call "
+                  f"set_as_default() on the clone, or solve the default version (v{before['default']}) in place")
+    elif solved_now and not in_place:
+        reason = (f"v{default} of {label} was solved in place, but its versions went from {before['versions']} to "
+                  f"{after['versions']}, and a version the run made is not default: did its command forget "
+                  "set_as_default() on what it made? A solve in place is accepted only when the run makes no "
+                  "other version")
     elif not new and not in_place and not after["solved"]:
         reason = (f"v{default} of {label} is still the default and still unsolved after the run: did its "
                   "command solve the scenario, and call set_as_default() on what it solved?")
