@@ -44,10 +44,10 @@ record of a solve in place beside a new version, and a run job of 0.2.0 (it reco
 check the version by hand, then `--version N --despite-failed-run`. A `transfer` into a platform
 whose folder does not exist: run `platform-add` or create the folder.
 
-Verified: tests only. 105 tests (27 skip without ixmp and message_ix), ruff clean, the trial
+Verified: 105 tests (27 skip without ixmp and message_ix), ruff clean, the trial
 script checked with `bash -n`. Six of the seven new tests, and both changed ones, fail against
 0.4.1 (the seventh checks that read jobs and seed merges still merge as before), and the review's
-three demonstrations now fail as written. The cluster trial of 0.4.2 is pending. The trial is
+three demonstrations now fail as written. The cluster trial passed on UniCC (2026-10-10, `TRIAL PASSED`), every section of it. A final cold review of the 0.4.2 changes found nothing of medium severity or above. The trial is
 unchanged: no runs file can make `run-mark --before` fail without touching the
 job's environment, so the run that never started is covered by a test that runs `job_run.do`
 with a venv whose `python` fails `run-mark`.
