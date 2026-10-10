@@ -55,13 +55,14 @@ Inside a job (see the SLURM templates):
                                         record S's versions before the run's command, and the
                                         version it left as default after it; refused unless
                                         that is a new version, or the default solved in place
-                                        (unsolved before, solved after)
+                                        (unsolved before, solved after, no other version made)
     merge --job-dir DIR --scenario S [--version N | --version default] [--allow-unsolved]
           [--despite-failed-run] [--model M] [--into P] [--apply]
                                         the version is the one the run recorded (run-mark);
                                         a job without run records needs --version; a job whose
-                                        run did not complete (no run-mark --after) is refused
-                                        unless --version N --despite-failed-run
+                                        run did not complete, never started (run-mark --before
+                                        failed) or was refused is refused unless --version N
+                                        --despite-failed-run
 
 P defaults to [project] platform, M to [project] model. Without --apply, backup, restore,
 seed, merge and transfer only run their checks.
@@ -69,9 +70,9 @@ seed, merge and transfer only run their checks.
 Exit codes: 0 done; 3 refused, nothing changed (also: no H drive, an unknown platform, no
 config, a command line the tool does not accept); 2 a copy does not match its source, verify found a difference, a comparison after a
 merge or transfer failed, or collect met a record it will not overwrite; 4 a merge or transfer
-failed after its backup, or left its target not shut down cleanly (the message names the backup
-to restore from); 1 a failed doctor check, or Python's own code for an uncaught error (a bug or
-a failure no guard anticipated, never a refusal).
+failed after its backup, or left its target not shut down cleanly (the message says what to
+check; database files are never swapped by hand); 1 a failed doctor check, or Python's own code
+for an uncaught error (a bug or a failure no guard anticipated, never a refusal).
 """
 
 from __future__ import annotations
