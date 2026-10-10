@@ -1,11 +1,12 @@
 """What a merge needs before it touches the target: the run's own record of the version it left as
 default, about the model and scenario merged, or an explicit --version; and no earlier merge of the
-same version of the same scenario from the same source. All dry runs: these refusals come before any
-backup or JVM."""
+same version of the same scenario from the same source. Dry runs: these refusals come before any
+backup or JVM; and what a merge or transfer failing after its backup says, with the platforms faked."""
 
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -272,3 +273,105 @@ def test_a_record_of_an_earlier_release_is_judged_again(setup):
     assert merge().returncode == 0
     done = merge("--version", "2", "--despite-failed-run")
     assert done.returncode == 3 and "which accepts the run" in done.stderr, done.stderr
+
+
+class _FakePlatform:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def close_db(self):
+        pass
+
+
+def _merged(model, scenario, version, marker):
+    return {"model": model, "scenario": scenario, "source_version": version, "merged_version": 7,
+            "was_default_in_job": True, "set_default": True, "marker": marker, "compare": {"ok": True}}
+
+
+def test_exit_4_says_what_to_check(setup, monkeypatch, capsys):
+    """A merge failing after its backup (a JVM error in the clone), or leaving its target not shut
+    down cleanly, exits 4 with what to check and never advises restoring the main from its backup.
+    In process, with the platforms faked: no JVM. A refused run merged by hand is recorded so."""
+    import ixmp
+
+    from ixmp_copies import cli, platforms
+    from ixmp_copies import config as config_mod
+
+    cfg, area, _, job, main, _, run_result = setup
+    main_db = main / "db" / dbc.STEM
+    monkeypatch.chdir(cfg.project_root)
+    monkeypatch.delenv(config_mod.ENV, raising=False)
+    monkeypatch.setattr(platforms, "platform_db", lambda name: main_db)
+    monkeypatch.setattr(ixmp, "Platform", _FakePlatform)
+
+    def oom(*args):
+        raise RuntimeError("java.lang.OutOfMemoryError: Java heap space")
+
+    monkeypatch.setattr(platforms, "merge_scenario", oom)
+    run_result()
+    assert cli.main(["merge", "--job-dir", str(job), "--scenario", "sc", "--apply"]) == 4
+    err = capsys.readouterr().err
+    assert "FAILED: MERGE: RuntimeError: java.lang.OutOfMemoryError" in err, err
+    assert "restore from" not in err and "Never swap database files by hand" in err, err
+    assert f"'{dbc.merge_marker(str(job), 'm', 'sc', 2)}'" in err and "FORCE_RUNS" in err, err
+    assert str(area / "backups") in err and not list(cfg.records_dir.glob("merge_*.json"))
+
+    def lands_and_holds(src_mp, dst_mp, model, scenario, version, marker, key, legacy):
+        Path(f"{main_db}.lck").write_text("held")  # the main left not shut down cleanly
+        return _merged(model, scenario, version, marker)
+
+    monkeypatch.setattr(platforms, "merge_scenario", lands_and_holds)
+    time.sleep(1.1)  # backups and merge sources are named by the second
+    assert cli.main(["merge", "--job-dir", str(job), "--scenario", "sc", "--apply"]) == 4
+    err = capsys.readouterr().err
+    record = next(cfg.records_dir.glob("merge_*.json"))
+    assert f"merged and recorded ({record})" in err and "Never swap database files by hand" in err, err
+    assert "restore from" not in err and "never delete it" in err, err
+    Path(f"{main_db}.lck").unlink()
+    record.unlink()
+
+    (job / dbc.RUN_BEFORE).write_text(json.dumps(
+        {"model": "m", "scenario": "sc", "versions": [1], "default": 1, "solved": False}))
+    run_result(versions=[1, 2], default=1, new=False, accepted=False, reason="a version the run made is not default")
+    monkeypatch.setattr(platforms, "merge_scenario", lambda *a: _merged(*a[2:6]))
+    time.sleep(1.1)
+    assert cli.main(["merge", "--job-dir", str(job), "--scenario", "sc", "--version", "2", "--despite-failed-run",
+                     "--apply"]) == 0
+    by_hand = json.loads(next(cfg.records_dir.glob("merge_*.json")).read_text())
+    assert by_hand["despite_failed_run"] is True and by_hand["run"]["accepted"] is False, by_hand
+    assert by_hand["source_version"] == 2
+
+
+def test_a_failed_transfer_names_its_backup(setup, monkeypatch, capsys, tmp_path):
+    """A transfer failing after its backup exits 4 naming the backup to restore to a new folder; into
+    a new database (no backup) it says only that the target may hold a partial version."""
+    import ixmp
+    import message_ix
+
+    from ixmp_copies import cli, platforms
+    from ixmp_copies import config as config_mod
+
+    cfg, _, _, _, _, _, _ = setup
+    target = fake_db(tmp_path / "local")
+    monkeypatch.chdir(cfg.project_root)
+    monkeypatch.delenv(config_mod.ENV, raising=False)
+    monkeypatch.setattr(platforms, "is_hsqldb", lambda name: True)
+    monkeypatch.setattr(platforms, "platform_db", lambda name: target)
+    monkeypatch.setattr(ixmp, "Platform", _FakePlatform)
+    monkeypatch.setattr(message_ix, "Scenario", lambda *a, **k: object())
+
+    def broken(mp):
+        raise RuntimeError("java.lang.OutOfMemoryError")
+
+    monkeypatch.setattr(platforms, "read_registry", broken)
+    argv = ["transfer", "--from", "ixmp-dev", "--to", "loc", "--scenario", "s", "--version", "1", "--apply"]
+    assert cli.main(argv) == 4
+    err = capsys.readouterr().err
+    backup = next((tmp_path / "hd" / cfg.backups / "loc").iterdir())  # outside every area: the backups folder
+    assert f"The backup taken before it: {backup}" in err and "restore it to a new folder" in err, err
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    monkeypatch.setattr(platforms, "platform_db", lambda name: fresh / "db")
+    assert cli.main(argv) == 4
+    err = capsys.readouterr().err
+    assert err.rstrip().endswith("may hold a partial version") and "backup" not in err, err

@@ -13,15 +13,19 @@
 # the record's (model=...); MODEL, for records that carry none. The latest merge of a run is the
 # last of its `run` line (0.4.0 and before), `merge` lines and `remerge` lines.
 #
-# A merge that exited 4 failed after its pre-merge backup: the main may hold what that merge
-# made. Check the main first (job_backup_main.do and a restore on the workstation, or a read job
-# on a seed made from a backup of the main). If a version of the scenario carries that merge's
-# marker (scenario meta), the clone landed and a resubmission is refused by the marker; check
-# that version by hand, since its merge record was never written. If none does, the merge did
-# not land: resubmit it with FORCE_RUNS="NAME ..." (the runs' names, space-separated). A version
-# a failed clone left half-made carries no marker: note its number, it stays. The tool does not
-# restore a main in place, by design: the backup that merge's log names is a copy to read, or to
-# restore elsewhere.
+# A merge that exited 4 failed after its pre-merge backup; its log's FAILED line says which way.
+# "merged and recorded": the version landed with its record and marker (a resubmission is
+# refused), but the main was left not shut down cleanly: find out why before anything merges
+# into it. "MERGE: ...": the main may hold what the merge made. Check it (job_backup_main.do and
+# a restore on the workstation, or a read job on a seed made from a backup of the main). A version
+# of the scenario carrying that merge's marker (scenario meta) is the merge, landed without its
+# record: check it by hand; a resubmission is refused by the marker. A version newer than every
+# version of the pre-merge backup without the marker is what the clone left: half-made, or
+# complete if only the marker could not be set. Inspect it; only when no complete copy is there,
+# resubmit with FORCE_RUNS="NAME ..." (the runs' names, space-separated), which adds another
+# version beside it. Note the number of a half-made version: it stays. The main is never restored
+# in place and its database files are never swapped by hand (records of merges made since would
+# outlive the swap): the backup the merge's log names is a copy to read, or to restore elsewhere.
 # Optional env: FORCE_RUNS, MERGE_OPTS (extra sbatch options). Appends what it did to the record.
 set -euo pipefail
 : "${CODE:?}"
@@ -61,7 +65,7 @@ field() { echo " $1" | grep -o " $2=[^ ]*" | head -1 | cut -d= -f2- || true; }
             case " ${FORCE_RUNS:-} " in
                 *" $name "*) forced=" forced"; echo "$name: merge $last exited 4; resubmitting, as FORCE_RUNS asks" ;;
                 *) echo "skip $name: merge $last exited 4 (failed after its backup): check the main, then" \
-                       "FORCE_RUNS=$name if the merge did not land (this script's header)"; continue ;;
+                       "FORCE_RUNS=$name if no complete copy of the merge is there (this script's header)"; continue ;;
             esac
         fi
     fi

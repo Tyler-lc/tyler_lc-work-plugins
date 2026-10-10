@@ -390,18 +390,24 @@ def _default(default_version, mp, model: str, scenario: str) -> int:
         raise Refused(f"{err}; pass --version") from err
 
 
-def _guarded(what: str, backup_dir: Path | None, target: str, fn):
-    """Run fn(); any failure after the backup becomes OperationFailed naming the backup."""
+# A results main is never restored over: a later merge's record would outlive the swap and
+# describe a version the main no longer holds.
+NO_SWAP = "Never swap database files by hand: records of merges made since would outlive the swap"
+
+
+def _guarded(what: str, target: str, remedy: str, fn):
+    """Run fn(); any failure after the backup becomes OperationFailed saying what to check
+    (`remedy`)."""
     try:
         return fn()
     except (Refused, AlreadyMerged):
         raise
     except Exception as err:  # noqa: BLE001 -- JVM errors (e.g. OutOfMemoryError) are not
         # Python exception classes one can name here; whatever it is, the target may now hold
-        # a partial version, so the backup to restore from must be in the message.
-        where = f": restore from {backup_dir}" if backup_dir else ""
+        # a partial version, so what to check must be in the message.
         raise OperationFailed(f"{what}: {type(err).__name__}: {str(err)[:300]}; {target} may hold a "
-                              f"partial version{where}") from err
+                              f"partial version" + (f". {remedy}" if remedy else "")) from err
+
 
 
 def cmd_run_mark(args) -> int:
@@ -560,9 +566,16 @@ def cmd_merge(args) -> int:
         if version == "default":
             version = _default(default_version, src_mp, model, args.scenario)
         marker, legacy = markers(version)
+        remedy = (f"Check {into} before anything else merges into it: a version of {model}/{args.scenario} "
+                  f"whose scenario meta {cfg.marker_key!r} is {marker!r} is this merge, landed without its "
+                  "record (a resubmission is refused by the marker). A version newer than every version of the "
+                  "pre-merge backup without that meta is what the clone left: half-made, or complete if only "
+                  "the marker could not be set. Inspect it before merging again: a resubmission (submit_merges.sh "
+                  f"with FORCE_RUNS=<run>) adds another version beside it. {NO_SWAP}. The pre-merge backup, a "
+                  f"copy to read: {backup_dir}")
         dst_mp = ixmp.Platform(into)
         try:
-            out = _guarded("MERGE", backup_dir, f"{into} ({dst})", lambda: merge_scenario(
+            out = _guarded("MERGE", f"{into} ({dst})", remedy, lambda: merge_scenario(
                 src_mp, dst_mp, model, args.scenario, version, marker, cfg.marker_key, legacy))
         except AlreadyMerged as err:
             raise Refused(f"{err}{changed}") from err
@@ -581,8 +594,10 @@ def cmd_merge(args) -> int:
     try:
         copies.require_closed(dst)
     except Refused as err:
-        raise OperationFailed(f"merged and recorded ({record}), but {err}; check before the next merge, "
-                              f"or restore from {backup_dir}") from err
+        raise OperationFailed(f"merged and recorded ({record}): the version landed, and a resubmission is "
+                              f"refused by its record and marker; but {err}. Nothing may merge into {into} until "
+                              "it is shut down cleanly: find what holds it, and take a stale lock to the user, "
+                              f"never delete it. {NO_SWAP}. The pre-merge backup, a copy to read: {backup_dir}") from err
     return 0 if out["compare"]["ok"] else 2
 
 
@@ -651,7 +666,10 @@ def cmd_transfer(args) -> int:
                 if check["ok"]:
                     copy.set_as_default()
                 return {"registry_added": added, "version": int(copy.version), "compare": check}
-            out = _guarded("TRANSFER", backup_dir, args.to, move)
+            remedy = (f"The backup taken before it: {backup_dir}; restore it to a new folder (ixmp-copies "
+                      "restore, then platform-add) if the target is damaged, never over the target's own "
+                      "files" if backup_dir else "")
+            out = _guarded("TRANSFER", args.to, remedy, move)
         finally:
             dst_mp.close_db()
     finally:
