@@ -154,6 +154,7 @@ def test_a_run_whose_merge_was_not_submitted_stays_recorded(project, tmp_path):
     out = subprocess.run(["bash", str(code / ".ixmp_copies/slurm/submit_runs.sh"), str(seed), str(main), "batch.txt"],
                          cwd=caller, capture_output=True, text=True, env={**env, "AREA": "test"})
     assert out.returncode == 1 and "the merge of a_run could not be submitted" in out.stderr, out.stdout + out.stderr
+    assert "a new runs file whose name is not batch.*" in out.stderr, out.stderr
     rec_path = next((hd / "ixmp_test" / "runs").glob("submitted_batch_into_results_*.txt"))
     rec = rec_path.read_text().splitlines()
     assert len(rec) == 2 and rec[1].startswith("run a_run job=101 dir=") and " scenario=sc_a model=m cmd=python a.py" \
@@ -168,3 +169,12 @@ def test_a_run_whose_merge_was_not_submitted_stays_recorded(project, tmp_path):
     merge = (fake / "sbatch.log").read_text().splitlines()[-1].split("|")
     assert "SCENARIO=sc_a" in merge and "afterok:101,singleton" in merge[-1], merge
     assert "remerge a_run run=101 merge=102" in rec_path.read_text()
+    # The runs not submitted: the same name (any extension) is refused, another name goes.
+    (caller / "batch.csv").write_text("b_run sc_b python b.py\n")
+    (caller / "batch_rest.txt").write_text("b_run sc_b python b.py\n")
+    for name, want in (("batch.txt", 1), ("batch.csv", 1), ("batch_rest.txt", 0)):
+        rest = subprocess.run(["bash", str(code / ".ixmp_copies/slurm/submit_runs.sh"), str(seed), str(main), name],
+                              cwd=caller, capture_output=True, text=True, env={**env, "AREA": "test"})
+        assert rest.returncode == want, (name, rest.stdout + rest.stderr)
+        assert want == 0 or "already submitted" in rest.stderr, rest.stderr
+    assert "CMD=python b.py" in (fake / "sbatch.log").read_text().splitlines()[-2]

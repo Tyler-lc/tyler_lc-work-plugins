@@ -18,7 +18,9 @@
 # with the same model and scenario.
 # Every merge into MAIN runs under one job name with --dependency=singleton, one at a time;
 # a failed run cancels its own merge only. Refuses a second submission of the same RUNS_FILE
-# into the same MAIN. Logs and the submission record go to <area>/runs/.
+# (by name, extension aside) into the same MAIN: after a merge that could not be submitted, the
+# runs not submitted go in a runs file of another name. Logs and the submission record go to
+# <area>/runs/.
 set -euo pipefail
 : "${CODE:?}" "${AREA:?}"
 SEED="${1:?SEED}"; MAIN="${2:?MAIN}"; RUNS_FILE="${3:?RUNS_FILE}"
@@ -61,7 +63,8 @@ while read -r name scenario cmd || [ -n "$name" ]; do
             --job-name="merge_into_$MAIN_NAME" --dependency="afterok:$run,singleton" \
             --kill-on-invalid-dep=yes ${MERGE_OPTS:-} "$D/job_merge.do"); then
         echo "the merge of $name could not be submitted; run $run is recorded in $REC: submit its merge with" \
-            "submit_merges.sh $REC. Runs after $name in $RUNS_FILE were not submitted." >&2
+            "submit_merges.sh $REC. Runs after $name in $RUNS_FILE were not submitted: put them in a new runs" \
+            "file whose name is not $BATCH.* ($BATCH now counts as submitted into $MAIN_NAME, and is refused)." >&2
         exit 1
     fi
     echo "merge $name merge=$merge" | tee -a "$REC"
