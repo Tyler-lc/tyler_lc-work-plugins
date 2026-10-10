@@ -261,6 +261,37 @@ def test_job_scripts_run_against_a_snapshot(project, tmp_path):
 
 
 
+@needs_ixmp
+def test_a_run_whose_run_mark_before_fails_is_never_merged(project, tmp_path):
+    """job_run.do with MERGE_SCENARIO: run-mark --before fails (here the venv's python refuses it, as a
+    JVM or platform error would), so the command never runs, and job-close still closes the copy. The
+    copy names its scenario in expected_merges.txt and holds no run_before.json: its merge refuses it
+    as a run that never started, --version default included."""
+    cfg, hd = project
+    _git_project(cfg)
+    code = Path(stage.stage(cfg, "test", [], local_remote))
+    job, seed_dir = _job(cfg, hd, tmp_path, "pre")
+    dbc.job_close(job)
+    main = hd / "ixmp_test" / "mains" / "results"
+    dbc.job_copy(seed_dir, main, cfg.platform, SHARED, tmp_path / "model_src", "test", cfg, kind="main")
+    activate = Path(cfg.venv) / "bin" / "activate"
+    activate.write_text(activate.read_text().replace(
+        "python() {", 'python() { case " $* " in *" run-mark "*) echo "fake: no JVM" >&2; return 1 ;; esac;'))
+    env = {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin", "CODE": str(code), "AREA": "test",
+           "SEED": str(seed_dir), "NAME": "nostart", "SLURM_JOB_ID": "45", "MERGE_SCENARIO": "sc",
+           "CMD": 'touch "$IXC_JOB_DIR/cmd_ran"'}
+    out = subprocess.run(["bash", str(code / ".ixmp_copies/slurm/job_run.do")], capture_output=True,
+                         text=True, env=env, cwd=tmp_path)
+    assert out.returncode != 0 and "Exit: run 1 mark 1 close 0 seed 0" in out.stdout, out.stdout[-2000:] + out.stderr
+    job_dir = hd / "ixmp_test" / "jobs" / "nostart_45"
+    assert not (job_dir / "cmd_ran").exists() and (job_dir / "result.json").is_file()
+    assert (job_dir / dbc.EXPECTED_MERGES).read_text() == "sc\n" and not (job_dir / dbc.RUN_BEFORE).exists()
+    for extra in ((), ("--version", "default")):
+        merge = run_cli(["merge", "--job-dir", str(job_dir), "--scenario", "sc", *extra], cfg.project_root,
+                        IXMP_DATA=str(main / "ixmp"))
+        assert merge.returncode == 3 and "never started" in merge.stderr, (extra, merge.stdout + merge.stderr)
+
+
 def test_init_sanitises_the_folder_name(tmp_path):
     proj = tmp_path / "4th-Gen.Paper"
     proj.mkdir()

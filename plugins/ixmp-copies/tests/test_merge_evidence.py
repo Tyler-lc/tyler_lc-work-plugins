@@ -196,3 +196,79 @@ def test_a_seed_merge_refusal_says_how_to_bring_a_changed_version(setup, tmp_pat
     _earlier(cfg, main, dbc.merge_marker(str(job.resolve()), "m", "sc", 2), n=2)
     again = merge()
     assert again.returncode == 3 and "was merged into" in again.stderr and "clone it" not in again.stderr
+
+
+def test_a_run_that_never_started_is_not_merged(setup):
+    """job_run.do wrote expected_merges.txt naming the scenario, then run-mark --before failed (a JVM or
+    platform error): the command never ran, job-close did. Every version in the copy may be the seed's:
+    refused like a run that did not complete, --version default included."""
+    _, area, _, job, _, merge, _ = setup
+    (job / dbc.EXPECTED_MERGES).write_text("sc\n")
+    for extra in ((), ("--version", "default"), ("--version", "1"), ("--version", "default", "--despite-failed-run"),
+                  ("--version", "default", "--apply")):
+        out = merge(*extra)
+        assert out.returncode == 3 and "never started" in out.stderr, (extra, out.stdout + out.stderr)
+        assert "--version default" not in out.stderr.split("REFUSED:", 1)[1], out.stderr
+    assert not (area / "backups").exists() and not list(job.glob("merge_src_*"))
+    other = merge(scenario="other")  # any scenario of that copy
+    assert other.returncode == 3 and "never started" in other.stderr, other.stderr
+    by_hand = merge("--version", "1", "--despite-failed-run")
+    assert by_hand.returncode == 0 and "dry run" in by_hand.stdout, by_hand.stdout + by_hand.stderr
+
+
+def test_what_does_not_count_as_a_run_that_never_started(setup):
+    """A read job (an empty expected_merges.txt, or only whitespace) and a seed merge (expected_merges.txt
+    beside seed_merge.txt) hold no run records by design: a named version merges as before."""
+    _, _, seed, job, _, merge, _ = setup
+    (job / dbc.EXPECTED_MERGES).write_text("\n")
+    bare = merge()
+    assert bare.returncode == 3 and "no run record" in bare.stderr, bare.stderr
+    assert merge("--version", "default").returncode == 0
+    (job / dbc.EXPECTED_MERGES).write_text("sc\n")
+    (job / dbc.SEED_MERGE).write_text(str(seed) + "\n")
+    told = merge("--version", "default")
+    assert told.returncode == 0 and "dry run" in told.stdout, told.stdout + told.stderr
+
+
+def test_a_refused_run_merges_only_by_hand(setup):
+    """run-mark --after refused the run (here: the base solved in place beside a forgotten clone). The
+    merge refuses it, says why and how to merge by hand; --version N --despite-failed-run merges."""
+    _, _, _, job, _, merge, run_result = setup
+    (job / dbc.RUN_BEFORE).write_text(json.dumps(
+        {"model": "m", "scenario": "sc", "versions": [1], "default": 1, "solved": False}))
+    run_result(versions=[1, 2], default=1, new=False, in_place=False, accepted=False,
+               reason="a version the run made is not default")
+    for extra in ((), ("--version", "2"), ("--version", "default", "--despite-failed-run")):
+        out = merge(*extra)
+        assert out.returncode == 3 and "a version the run made is not default" in out.stderr, (extra, out.stderr)
+        assert "--version N --despite-failed-run" in out.stderr, out.stderr
+    by_hand = merge("--version", "2", "--despite-failed-run")
+    assert by_hand.returncode == 0 and "sc v2 from" in by_hand.stdout, by_hand.stdout + by_hand.stderr
+    run_result(versions=[1], default=1, before=[1], new=False)  # a record of 0.3.0: `new` false, no verdict
+    legacy = merge("--version", "1", "--despite-failed-run")
+    assert legacy.returncode == 0, legacy.stderr
+    run_result(model="OTHER_MODEL", accepted=False, reason="x")  # another model: refused for that first
+    assert "OTHER_MODEL/sc, not m/sc" in merge("--version", "2", "--despite-failed-run").stderr
+
+
+def test_a_record_of_an_earlier_release_is_judged_again(setup):
+    """0.4.0 accepted the base solved in place beside a new, non-default version. A pending record of it
+    is judged by this release's rule too: refused, and mergeable only by hand. A record this release
+    accepts as well (a new version; a solve in place with no other version) merges."""
+    _, _, _, job, _, merge, run_result = setup
+    (job / dbc.RUN_BEFORE).write_text(json.dumps(
+        {"model": "m", "scenario": "sc", "versions": [1], "default": 1, "solved": False}))
+    run_result(versions=[1, 2], default=1, before=[1], before_default=1, before_solved=False,
+               new=False, in_place=True, accepted=True, reason=None)
+    out = merge()
+    assert out.returncode == 3 and "a version the run made is not default" in out.stderr, out.stdout + out.stderr
+    assert "earlier release" in out.stderr, out.stderr
+    assert merge("--version", "2", "--despite-failed-run").returncode == 0
+    run_result(versions=[1], default=1, before=[1], before_default=1, before_solved=False,
+               new=False, in_place=True, accepted=True, reason=None)
+    in_place = merge()
+    assert in_place.returncode == 0 and "sc v1 from" in in_place.stdout, in_place.stdout + in_place.stderr
+    run_result(before_default=1, before_solved=True, accepted=True, reason=None)  # v2 new and default
+    assert merge().returncode == 0
+    done = merge("--version", "2", "--despite-failed-run")
+    assert done.returncode == 3 and "which accepts the run" in done.stderr, done.stderr

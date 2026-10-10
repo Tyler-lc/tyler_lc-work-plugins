@@ -440,33 +440,61 @@ def cmd_run_mark(args) -> int:
     return 0
 
 
+def _failed_run(job_dir: Path, run: dict | None) -> str | None:
+    """Why no version of the job copy is known to be its run's result, or None. A run that recorded
+    its scenario before its command and nothing after it did not complete; one declared to merge a
+    scenario (expected_merges.txt, outside a seed merge) that recorded nothing never started; one
+    whose record refuses it failed. A record is judged by this release's rule as well as by the
+    verdict stored in it: an earlier release accepted runs this one refuses."""
+    from ixmp_copies.platforms import run_outcome
+
+    if run is None:
+        if (job_dir / copies.RUN_BEFORE).exists():
+            return (f"{job_dir}'s run did not complete: {copies.RUN_BEFORE} is there and {copies.RUN_RESULT} is not "
+                    "(its command failed, or run-mark --after never ran), so no version of the copy is known to be "
+                    "the run's result")
+        expected = job_dir / copies.EXPECTED_MERGES
+        names = expected.read_text().split() if expected.exists() else []
+        if names and not (job_dir / copies.SEED_MERGE).exists():
+            return (f"{job_dir}'s run never started: it was submitted to merge {names} ({copies.EXPECTED_MERGES}) "
+                    f"and holds no {copies.RUN_BEFORE} (run-mark --before failed, so its command never ran; or the "
+                    "job is of 0.2.0, which recorded no runs): every version in the copy may be one the seed held")
+        return None
+    # Records of 0.3.0 carry only `new`, which was then the whole test.
+    if not run.get("accepted", run["new"]):
+        return run.get("reason") or (f"the run left no new version of {run['scenario']} as default (default "
+                                     f"{run['default']}, versions before it {run['before']}): did its command call "
+                                     "set_as_default()?")
+    if "before_default" in run:  # 0.4.0 and later: the states before and after are in the record
+        now = run_outcome({"versions": run["before"], "default": run["before_default"],
+                           "solved": run["before_solved"]}, run)
+        if not now["accepted"]:
+            return (f"{now['reason']} (the run's record, written by an earlier release, accepted it; this "
+                    "release does not)")
+    return None
+
+
 def _merge_version(job_dir: Path, model: str, scenario: str, requested, allow_unsolved: bool,
                    despite_failed_run: bool = False):
-    """The version a merge brings back, and the run's own record of it when there is one. A run
-    that recorded its scenario before its command and nothing after it did not complete: nothing
-    says which version is its result, so only a named version with --despite-failed-run merges."""
+    """The version a merge brings back, and the run's own record of it when there is one. For a run
+    that did not complete, never started or was refused (_failed_run) nothing says which version is
+    its result, so only a named version with --despite-failed-run merges."""
     result_file = job_dir / copies.RUN_RESULT
-    incomplete = (job_dir / copies.RUN_BEFORE).exists() and not result_file.exists()
-    if despite_failed_run and not incomplete:
-        raise Refused(f"--despite-failed-run is for a job whose run did not complete; {job_dir} has "
-                      + (f"its run's record ({copies.RUN_RESULT})" if result_file.exists() else "no run records"))
-    if incomplete:
+    run = json.loads(result_file.read_text()) if result_file.exists() else None
+    if run is not None and (run["model"], run["scenario"]) != (model, scenario):
+        raise Refused(f"{job_dir}'s run was about {run['model']}/{run['scenario']}, not {model}/{scenario} "
+                      "(pass the run's --model and --scenario)")
+    failed = _failed_run(job_dir, run)
+    if despite_failed_run and failed is None:
+        raise Refused(f"--despite-failed-run is for a job whose run did not complete, never started or was refused; "
+                      f"{job_dir} has " + (f"its run's record ({copies.RUN_RESULT}), which accepts the run"
+                                           if run is not None else "no run records"))
+    if failed:
         if not (despite_failed_run and isinstance(requested, int)):
-            raise Refused(f"{job_dir}'s run did not complete: {copies.RUN_BEFORE} is there and {copies.RUN_RESULT} "
-                          "is not (its command failed, or run-mark --after never ran), so no version of the copy is "
-                          "known to be the run's result. Nothing is merged. To merge a version by hand after "
-                          "checking it, name it: --version N --despite-failed-run")
-        return requested, None
-    if result_file.exists():
-        run = json.loads(result_file.read_text())
-        if (run["model"], run["scenario"]) != (model, scenario):
-            raise Refused(f"{job_dir}'s run was about {run['model']}/{run['scenario']}, not {model}/{scenario} "
-                          "(pass the run's --model and --scenario)")
-        # Records of 0.3.0 carry only `new`, which was then the whole test.
-        if not run.get("accepted", run["new"]):
-            raise Refused(run.get("reason") or f"the run left no new version of {scenario} as default (default "
-                          f"{run['default']}, versions before it {run['before']}): did its command call "
-                          "set_as_default()?")
+            raise Refused(f"{failed}. Nothing is merged. To merge a version by hand after checking it, name it: "
+                          "--version N --despite-failed-run")
+        return requested, run
+    if run is not None:
         if requested not in (None, "default") and requested != run["default"]:
             raise Refused(f"--version {requested} is not the version the run left as default ({run['default']})")
         if not run["solved"] and not allow_unsolved:
