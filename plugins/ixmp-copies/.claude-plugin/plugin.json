@@ -1,6 +1,6 @@
 {
   "name": "ixmp-copies",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Run MESSAGE-ix solves on a SLURM cluster against checked copies of a local HyperSQL ixmp database, and merge the results back",
   "author": {
     "name": "Tyler-lc"

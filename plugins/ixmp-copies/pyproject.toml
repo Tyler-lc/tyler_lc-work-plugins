@@ -1,6 +1,6 @@
 [project]
 name = "ixmp-copies"
-version = "0.4.1"
+version = "0.4.2"
 description = "Run MESSAGE-ix/ixmp work on a SLURM cluster against checked copies of a local HyperSQL database"
 readme = "README.md"
 license = "MIT"

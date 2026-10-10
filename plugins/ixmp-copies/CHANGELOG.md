@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.4.2 (2026-10-10)
+
+Fixes from a fourth cold review of 0.4.1.
+
+- **`merge` refuses a run that never started.** A run job whose `run-mark --before` failed (a JVM
+  or platform error) skipped its command and still closed its copy; with no run records, its merge
+  was offered `--version default`, which brought back the seed's version. A job copy whose
+  `expected_merges.txt` names a scenario and that holds no `run_before.json` (a seed merge's job
+  aside) is now refused whatever the version, like a run that did not complete. `job_run.do` stops
+  before closing the copy if it cannot write `expected_merges.txt`, so a closed run job always has
+  it.
+- **A refused run can be merged by hand.** A job whose `run_result.json` refuses the run (e.g. the
+  base solved in place beside a forgotten clone) had no way to merge a version checked by hand;
+  `--version N --despite-failed-run` now merges it (an explicit number only), and the merge record
+  keeps the flag and the run's record. Without the flag the merge still refuses, and now says how.
+- **A run record is judged again at merge time.** A record written by 0.4.0 accepted the default
+  solved in place beside a new, non-default version, which 0.4.1's `run-mark` refuses; merging
+  such a pending record with 0.4.1 brought back the base version. `merge` now applies the current
+  rule to the before and after states stored in a 0.4.0 or later record, and refuses when either
+  that rule or the stored verdict does.
+- **Exit 4 says what to check.** The messages of a merge failing after its backup, or leaving its
+  target not shut down cleanly, no longer say to restore from the backup. They say how to check
+  the main (a version carrying the merge's marker is the merge, landed without its record; a newer
+  version without it is what the clone left, possibly complete if only the marker failed), when
+  to resubmit with `FORCE_RUNS`, and never to swap database files by hand: records of merges made
+  since would outlive the swap. The 0.4.1 entry's claim that this advice was gone is true from
+  this release. A failed `transfer` names its backup, to restore to a new folder.
+- **`transfer` into a new database needs its folder.** A target with no database files is new
+  only in an existing empty folder (`platform-add --apply` makes it); a missing folder is refused
+  with "run platform-add or create it" (0.4.1 took a missing folder below an existing one).
+- `submit_runs.sh`, when a merge could not be submitted, says to put the runs not submitted in a
+  runs file of another name: the same name, whatever its extension, is refused as already
+  submitted into that main.
+- The skill's "A merge exited 4" separates the two cases (record written, target not closed;
+  clone failed, possibly complete without its marker), and the CLI usage of `run-mark` says "no
+  other version made".
+
+Upgrade from 0.4.1: stage a new snapshot; merges submitted from an older snapshot keep their old
+checks (`submit_merges.sh` with a 0.4.2 `CODE` applies the new ones). Merges that 0.4.1 allowed and
+0.4.2 refuses: a run job that never started (merged before with `--version default`), a 0.4.0
+record of a solve in place beside a new version, and a run job of 0.2.0 (it recorded no runs);
+check the version by hand, then `--version N --despite-failed-run`. A `transfer` into a platform
+whose folder does not exist: run `platform-add` or create the folder.
+
+Verified: tests only. 105 tests (27 skip without ixmp and message_ix), ruff clean, the trial
+script checked with `bash -n`. Six of the seven new tests, and both changed ones, fail against
+0.4.1 (the seventh checks that read jobs and seed merges still merge as before), and the review's
+three demonstrations now fail as written. The cluster trial of 0.4.2 is pending. The trial is
+unchanged: no runs file can make `run-mark --before` fail without touching the
+job's environment, so the run that never started is covered by a test that runs `job_run.do`
+with a venv whose `python` fails `run-mark`.
+
 ## 0.4.1 (2026-10-09)
 
 Fixes from a third cold review of 0.4.0.
