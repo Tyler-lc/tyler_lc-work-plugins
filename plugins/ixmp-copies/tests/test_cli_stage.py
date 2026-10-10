@@ -329,9 +329,9 @@ def test_transfer_into_a_platform_not_opened_yet(project, tmp_path):
 
 @needs_ixmp
 def test_transfer_target_folder(project, tmp_path):
-    """A database yet to be created is one in an empty folder or a missing folder below an existing
-    one; a url whose parent folder is missing too (a typo, an unmounted disk) is refused, as is a
-    folder holding other files."""
+    """A database yet to be created is one in an existing empty folder (platform-add makes it); a url
+    whose folder is missing (a typo, an unmounted disk), even below an existing folder, is refused, as
+    is a folder holding other files or a file where the folder should be."""
     cfg, _ = project
     home = tmp_path / "ixmp_home"
     home.mkdir()
@@ -345,10 +345,17 @@ def test_transfer_target_folder(project, tmp_path):
                        IXMP_DATA=str(home))
 
     unmounted = transfer_to(tmp_path / "not" / "mounted" / "db")
-    assert unmounted.returncode == 3 and "nor its parent" in unmounted.stderr, unmounted.stdout + unmounted.stderr
+    assert unmounted.returncode == 3 and "platform-add" in unmounted.stderr, unmounted.stdout + unmounted.stderr
     assert "a new database" not in unmounted.stdout
-    below = transfer_to(tmp_path / "newdb" / "db")  # missing, below an existing folder
-    assert below.returncode == 0 and "a new database, nothing to back up" in below.stdout, below.stdout + below.stderr
+    below = transfer_to(tmp_path / "newdb" / "db")  # missing, below an existing folder: refused too
+    assert below.returncode == 3 and "newdb does not exist" in below.stderr, below.stdout + below.stderr
+    assert "platform-add" in below.stderr and not (tmp_path / "newdb").exists()
+    (tmp_path / "newdb").mkdir()  # as platform-add leaves it
+    empty = transfer_to(tmp_path / "newdb" / "db")
+    assert empty.returncode == 0 and "a new database, nothing to back up" in empty.stdout, empty.stdout + empty.stderr
+    (tmp_path / "afile").write_text("x")
+    a_file = transfer_to(tmp_path / "afile" / "db")
+    assert a_file.returncode == 3 and "does not exist as a folder" in a_file.stderr, a_file.stdout + a_file.stderr
     (tmp_path / "busy").mkdir()
     (tmp_path / "busy" / "notes.txt").write_text("x")
     busy = transfer_to(tmp_path / "busy" / "db")

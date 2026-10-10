@@ -141,9 +141,9 @@ in its url. Without it, older ixmp versions create MEMORY tables, which hold the
 in the JVM and make every open slower as scenarios accumulate (the tool refuses to seed from such
 a database). The database is created on first open, which may be the first `transfer` into it
 (step 7); keep it on a local disk, never on the H drive. `transfer` takes a platform for a new
-database only when its folder is empty, or missing below an existing folder: a url whose parent
-folder is missing too (a typo, a disk not mounted) is refused. `--dir` may also name an existing
-database (e.g. one made by `restore`).
+database only when its folder exists and is empty, as `platform-add --apply` leaves it: a missing
+folder (a typo in a url written by hand, a disk not mounted) is refused. `--dir` may also name an
+existing database (e.g. one made by `restore`).
 
 ## 7. Scenarios into it
 

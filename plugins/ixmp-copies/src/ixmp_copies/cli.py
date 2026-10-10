@@ -39,7 +39,8 @@ On the workstation:
                                         copy one scenario across platforms (e.g. ixmp-dev to a
                                         local database, and back), adding the units, regions
                                         and time slices the target lacks; backs up a HyperSQL
-                                        target first (unless its database does not exist yet)
+                                        target first (unless its database does not exist yet:
+                                        an empty folder, as platform-add leaves it)
 Anywhere:
     seed (--from BACKUP | --from-job DIR) --area A --name N [--apply]
                                         read-only seed <area>/seeds/N/ (make it on the cluster:
@@ -602,23 +603,21 @@ def cmd_merge(args) -> int:
 
 
 def _fresh_target(db: Path) -> bool:
-    """Whether the HyperSQL database `db` is yet to be created: no files beside its stem, in a
-    folder that is empty (platform-add makes it) or does not exist below one that does. A platform
-    registered but never opened has nothing to back up or to find open; HyperSQL creates the
-    database on the first open. A folder holding other files, or one whose parent is missing too
-    (a mistyped url, a disk not mounted), is refused: HyperSQL would create a database there all
-    the same."""
-    if any(db.parent.glob(f"{db.name}.*")):
-        return False
+    """Whether the HyperSQL database `db` is yet to be created: no files beside its stem, in an
+    existing empty folder (platform-add makes it). A platform registered but never opened has
+    nothing to back up or to find open; HyperSQL creates the database on the first open. A missing
+    folder (a mistyped url, a disk not mounted) or one holding other files is refused: HyperSQL
+    would create a database there all the same."""
     folder = db.parent
-    if folder.exists():
-        if not folder.is_dir() or any(folder.iterdir()):
-            raise Refused(f"{folder} holds no {db.name}.* database but is not an empty folder: is the platform's "
-                          "url the database meant?")
-        return True
-    if not folder.parent.is_dir():
-        raise Refused(f"neither {folder} nor its parent {folder.parent} exists: a mistyped url, or a disk not "
-                      "mounted? Create the folder (or run platform-add) where the database belongs")
+    if not folder.is_dir():
+        raise Refused(f"{folder} does not exist{' as a folder' if folder.exists() else ''}: a mistyped url, or a "
+                      "disk not mounted? Run ixmp-copies platform-add (which creates it), or create it where the "
+                      "database belongs")
+    if any(folder.glob(f"{db.name}.*")):
+        return False
+    if any(folder.iterdir()):
+        raise Refused(f"{folder} holds no {db.name}.* database but is not an empty folder: is the platform's "
+                      "url the database meant?")
     return True
 
 
