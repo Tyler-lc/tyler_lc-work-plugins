@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased (local source-checkout fix, 2026-10-12)
+
+- `transfer` checks that the source is initially unlocked. If loading an older MESSAGE
+  scenario checks it out during initialization, it discards only that new checkout before
+  cross-platform cloning. It refuses a pre-existing lock rather than discarding somebody else's
+  changes. A real HyperSQL regression reproduces the pre-fix clone failure and passes with
+  the fix; the existing full-chain integration test passes.
+- The EFC `base_calibrated` v8 transfer from ixmp-dev to a local CACHED-table database
+  completed with equal demand/input/output/timeseries row counts. The source remained
+  unlocked. This change is local to the editable checkout until published upstream.
+
 ## 0.4.2 (2026-10-10)
 
 Fixes from a fourth cold review of 0.4.1.

@@ -193,6 +193,37 @@ mp.close_db()
     assert missing.returncode == 3 and "no default version" in missing.stderr, missing.stderr[-1000:]
 
 
+
+def test_transfer_does_not_leave_legacy_source_checked_out(project, tmp_path):
+    cfg, _ = project
+    source_db, target_db = tmp_path / "legacy" / "db", tmp_path / "target" / "db"
+    target_db.parent.mkdir()
+    home = ixmp_home(tmp_path / "ixmp_legacy", {"legacy": source_db, "target": target_db})
+    py(CREATE.format(name="legacy"), IXMP_DATA=str(home))
+    # Simulate a MESSAGE version whose constructor checks out its source. The clone must
+    # operate on the stored, checked-in version and leave that source unlocked.
+    py(f"""
+import message_ix
+from ixmp_copies.cli import main
+original = message_ix.Scenario
+def load(*args, **kwargs):
+    result = original(*args, **kwargs)
+    if args[0].name == "legacy" and args[2] == "{SCEN}":
+        result.check_out()
+    return result
+message_ix.Scenario = load
+raise SystemExit(main(["transfer", "--from", "legacy", "--to", "target",
+                       "--scenario", "{SCEN}", "--model", "{MODEL}", "--apply"]))
+""", IXMP_DATA=str(home), IXMP_COPIES_CONFIG=str(cfg.path))
+    py(f"""
+import ixmp
+mp = ixmp.Platform("legacy")
+row = mp.scenario_list(model="{MODEL}", default=False)
+row = row[(row.scenario == "{SCEN}") & (row.version == 1)]
+assert len(row) == 1 and not bool(row.is_locked.iloc[0])
+mp.close_db()
+""", IXMP_DATA=str(home))
+
 SOLVE_IN_PLACE = """
 import ixmp, message_ix
 mp = ixmp.Platform()

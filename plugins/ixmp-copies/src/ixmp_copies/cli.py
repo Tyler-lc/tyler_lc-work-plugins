@@ -656,7 +656,26 @@ def cmd_transfer(args) -> int:
     try:
         version = args.version if isinstance(args.version, int) else _default(
             default_version, src_mp, model, args.scenario)
+        rows = src_mp.scenario_list(model=model, default=False)
+        source_row = rows[(rows["scenario"] == args.scenario) & (rows["version"] == version)]
+        if source_row.empty:
+            raise Refused(f"{model}/{args.scenario} v{version} does not exist on {args.source}")
+        if bool(source_row["is_locked"].iloc[0]):
+            raise Refused(f"{model}/{args.scenario} v{version} is already checked out on {args.source}; "
+                          "do not discard another session's changes")
         src = message_ix.Scenario(src_mp, model, args.scenario, version=version)
+        # MESSAGE initialization may check out an older source merely by loading it.
+        # A cross-platform clone needs the stored source checked in; discard only the
+        # checkout made during this construction, never a pre-existing checkout.
+        rows = src_mp.scenario_list(model=model, default=False)
+        source_row = rows[(rows["scenario"] == args.scenario) & (rows["version"] == version)]
+        if bool(source_row["is_locked"].iloc[0]):
+            src.discard_changes()
+            rows = src_mp.scenario_list(model=model, default=False)
+            source_row = rows[(rows["scenario"] == args.scenario) & (rows["version"] == version)]
+            if bool(source_row["is_locked"].iloc[0]):
+                raise Refused(f"{model}/{args.scenario} v{version} remained checked out after discarding "
+                              "MESSAGE initialization; nothing was cloned")
         dst_mp = ixmp.Platform(args.to)
         try:
             def move():
