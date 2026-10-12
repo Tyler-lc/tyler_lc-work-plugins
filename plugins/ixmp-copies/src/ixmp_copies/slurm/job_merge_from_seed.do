@@ -10,6 +10,12 @@
 # and merges from that, one scenario at a time. Safe to resubmit with the same SEED and SCENARIOS
 # after a partial failure: what merged before is refused, the rest merges. Merges into the main must not overlap: give
 # this job the main's merge job name and --dependency=singleton when others may be running.
+# A merge that exited 4 (its FAILED line) may have left a version in the main without its record:
+# check the main first. A version carrying the merge's marker (scenario meta) is the merge, and a
+# resubmission refuses it; a version newer than the pre-merge backup's without the marker is what
+# the clone left, half-made or complete. Resubmit with SCENARIOS naming only the scenarios that
+# have no complete copy in the main: one without the marker would land again beside it. The main's
+# database files are never swapped by hand.
 # Env: CODE, AREA, SEED, MAIN, SCENARIOS ("name name:version ..."; no version = the seed's
 # default); optional MODEL.
 : "${CODE:?}" "${AREA:?}" "${SEED:?}" "${MAIN:?}" "${SCENARIOS:?}"
@@ -18,10 +24,10 @@ export JAVA_TOOL_OPTIONS="-Xmx$IXC_HEAP_MERGE"
 JOB_DIR="$(ixc where --area "$AREA" jobs)/merge_seed_${SLURM_JOB_ID}"
 step ixc job-copy --seed "$SEED" --job-dir "$JOB_DIR" --area "$AREA" || exit 1
 step ixc job-close --job-dir "$JOB_DIR" || exit 1
-for sv in $SCENARIOS; do echo "${sv%%:*}"; done > "$JOB_DIR/expected_merges.txt"
+for sv in $SCENARIOS; do echo "${sv%%:*}"; done > "$JOB_DIR/expected_merges.txt" || exit 1
 # Marks every merge by the seed rather than this job folder, so resubmitting the same SCENARIOS
 # (after a partial failure) is refused for those already merged instead of landing them twice.
-echo "$SEED" > "$JOB_DIR/seed_merge.txt"
+echo "$SEED" > "$JOB_DIR/seed_merge.txt" || exit 1
 export IXMP_DATA="$MAIN/ixmp"
 step ixc job-check --job-dir "$MAIN" || exit 1
 RC=0

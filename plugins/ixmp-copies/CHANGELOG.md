@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.4.3 (2026-10-12)
+
+Low findings of the final review of 0.4.2 and its open items. None of them could merge a wrong
+version or lose data.
+
+- **A version the job copy lacks is refused before the backup.** `merge --version N` naming a
+  version the job copy does not hold failed inside the clone, after the pre-merge backup (exit 4,
+  "may hold a partial version"). The merge now opens its copy of the job's database first, finds
+  the version (or the default, for `--version default`) and refuses with exit 3, nothing changed,
+  before it backs up the target. A `--version default` merge is also checked against earlier merge
+  records before the backup, as a numbered one always was.
+- **A target that does not open after the backup exits 4.** It exited 1 (Python's own code); the
+  message now says nothing was copied, that the main may be left not shut down cleanly, and that
+  merging again is safe once it is closed.
+- **Exit 4 of a seed merge gives the seed-merge recovery**: resubmit `job_merge_from_seed.do` with
+  `SCENARIOS` naming only the scenarios without a complete copy in the main, not `submit_merges.sh`
+  with `FORCE_RUNS`. Also in `job_merge_from_seed.do`'s header and the skill.
+- **A merge recorded with its target left open names a failed comparison too**, when there was one.
+- **`collect --gdx DIR` archives the GDX files and listings** (the equation duals live nowhere
+  else: ixmp does not store them) of every closed job copy into `DIR/<job>/`, checked like any copy
+  (manifest, `verify`), never overwritten, with a record in the records folder. `cleanup` counts an
+  archived file as copied out after re-reading the archive, so merged solves are deleted without
+  `--include-outputs`. The cluster trial archives and cleans its merged solves this way.
+- **A `transfer` target that does not open exits 4**, like a merge's (it was 1), naming the backup
+  or, for a new database, the folder to look at.
+- `job_merge_from_seed.do` stops if it cannot write `expected_merges.txt` or `seed_merge.txt`, and
+  a seed merge's job without `seed_merge.txt` is refused with a message that says so (it read as a
+  run that never started).
+- `job_run.do`'s `Exit:` line says `run -` when the command never ran (`run-mark --before` failed);
+  it said `run 1`, like a command that failed.
+- `transfer` into a missing folder advises creating the folder; it named `platform-add`, which
+  refuses a platform already registered.
+- `--despite-failed-run`'s help names runs that never started or were refused; the skill says what
+  the flag waives (the solution check; for a run that never started, which scenario it was for).
+- The marketplace is named `tyler-lc-work-plugins` (CLI tools refuse `_` in the name): install with
+  `/plugin install ixmp-copies@tyler-lc-work-plugins`. The repository keeps its name.
+
+Upgrade from 0.4.2: stage a new snapshot. Scripts that read `Exit: run 1` for a run that never
+started now see `Exit: run -`.
+
+Verified: 111 tests pass with ixmp, message_ix, java and GAMS (30 skip without ixmp and
+message_ix); the nine new or changed tests fail against 0.4.2. Both job templates pass `bash -n`.
+Ruff reports no finding beyond the 64 already present in 0.4.2 except one unused `noqa`, which
+mirrors the existing one in `_guarded`. Not yet run: the cluster trial.
+
 ## 0.4.2 (2026-10-10)
 
 Fixes from a fourth cold review of 0.4.1.

@@ -23,16 +23,20 @@ On the workstation:
                                         the line that registers it with ixmp
     stage --area A [--extra F ...]      a committed snapshot of the project, plus this tool, to
                                         <area>/code/<sha>/ on the cluster's side (the jobs' CODE)
-    collect --area A                    copy the records jobs and merges wrote into the
+    collect --area A [--gdx DIR]        copy the records jobs and merges wrote into the
                                         project's records folder (write-once; submission
-                                        records, which only grow, are updated)
+                                        records, which only grow, are updated); with --gdx,
+                                        also archive each closed job copy's GDX files and
+                                        listings (model/) into DIR/<job>/, checked, never
+                                        overwritten; cleanup then counts them as copied out
     cleanup --area A --main NAME [--include-outputs] [--apply]
                                         delete the job copies whose every expected scenario a
                                         merge record shows merged into <area>/mains/NAME (or
                                         that were meant to merge nothing), whose records are
                                         collected and that hold no output a run wrote (files in
                                         the job folder, new or changed files in its code copy,
-                                        GDX files and listings in its model folder); keep the rest
+                                        GDX files and listings in its model folder not archived
+                                        by collect --gdx); keep the rest
     cleanup --area A --discard JOB --reason TEXT [--include-outputs] [--apply]
                                         delete one closed job copy whatever its merges
     transfer --from P1 --to P2 --scenario S [--model M] [--version V] [--apply]
@@ -70,7 +74,8 @@ seed, merge and transfer only run their checks.
 Exit codes: 0 done; 3 refused, nothing changed (also: no H drive, an unknown platform, no
 config, a command line the tool does not accept); 2 a copy does not match its source, verify found a difference, a comparison after a
 merge or transfer failed, or collect met a record it will not overwrite; 4 a merge or transfer
-failed after its backup, or left its target not shut down cleanly (the message says what to
+failed after its backup (a merge also when its target does not open then), or left its target
+not shut down cleanly (the message says what to
 check; database files are never swapped by hand); 1 a failed doctor check, or Python's own code
 for an uncaught error (a bug or a failure no guard anticipated, never a refusal).
 """
@@ -279,12 +284,45 @@ def cmd_stage(args) -> int:
 
 def cmd_collect(args) -> int:
     cfg = config_mod.load()
-    out = stage.collect(cfg, copies.area_root(args.area, cfg))
+    area_dir = copies.area_root(args.area, cfg)
+    dest = Path(args.gdx).expanduser().resolve() if args.gdx else None
+    if dest is not None:
+        jobs = (area_dir / copies.COPY_KINDS["job"]).resolve()
+        if not dest.is_dir():
+            raise Refused(f"--gdx {dest} is not an existing folder (create it where the archive belongs)")
+        if dest == jobs or jobs in dest.parents:
+            raise Refused(f"--gdx {dest} is inside {jobs}: cleanup would delete the archive with the jobs")
+    out = stage.collect(cfg, area_dir)
     print(f"{len(out['copied'])} copied, {len(out['updated'])} updated, {len(out['present'])} already present, "
           f"into {cfg.records_dir}")
     for c in out["conflicts"]:
         print(f"CONFLICT (not overwritten): {c}", file=sys.stderr)
-    return 2 if out["conflicts"] else 0
+    failed = bool(out["conflicts"])
+    if dest is not None:
+        failed = _archive_outputs(cfg, args.area, area_dir, dest) or failed
+    return 2 if failed else 0
+
+
+def _archive_outputs(cfg, area: str, area_dir: Path, dest: Path) -> bool:
+    """collect --gdx: archive the GDX files and listings of every closed job copy; True when one
+    could not be (a mismatch or an archive that will not be overwritten)."""
+    jobs_dir = area_dir / copies.COPY_KINDS["job"]
+    counts, failed = {"copied": 0, "present": 0, "none": 0}, False
+    for job in sorted(p for p in jobs_dir.iterdir() if p.is_dir()) if jobs_dir.is_dir() else []:
+        if job.name.endswith(copies.PARTIAL):
+            continue
+        if not (job / "result.json").exists():
+            print(f"not archived (its job has not closed it): {job.name}")
+            continue
+        try:
+            counts[copies.archive_outputs(cfg, area, job, dest)] += 1
+        except (Refused, CopyMismatch) as err:
+            print(f"{'MISMATCH' if isinstance(err, CopyMismatch) else 'CONFLICT'} (not archived): {err}",
+                  file=sys.stderr)
+            failed = True
+    print(f"model outputs: {counts['copied']} jobs archived, {counts['present']} already archived, "
+          f"{counts['none']} without GDX or listings, into {dest}")
+    return failed
 
 
 def cmd_cleanup(args) -> int:
@@ -392,6 +430,19 @@ def _default(default_version, mp, model: str, scenario: str) -> int:
         raise Refused(f"{err}; pass --version") from err
 
 
+def _open_target(name: str, db: Path, remedy: str):
+    """Open the HyperSQL platform `name` that a merge or transfer is about to write; a failure
+    exits 4: an open that fails may leave the database not shut down cleanly, or half-created."""
+    import ixmp
+
+    try:
+        return ixmp.Platform(name)
+    except Exception as err:  # noqa: BLE001 -- JVM errors are not Python classes one can name
+        raise OperationFailed(f"opening {name} ({db}) failed: {type(err).__name__}: {str(err)[:300]}; nothing "
+                              f"was copied into it, but the failed open may have left it not shut down cleanly. "
+                              f"{remedy}") from err
+
+
 # A results main is never restored over: a later merge's record would outlive the swap and
 # describe a version the main no longer holds.
 NO_SWAP = "Never swap database files by hand: records of merges made since would outlive the swap"
@@ -466,7 +517,9 @@ def _failed_run(job_dir: Path, run: dict | None) -> str | None:
         if names and not (job_dir / copies.SEED_MERGE).exists():
             return (f"{job_dir}'s run never started: it was submitted to merge {names} ({copies.EXPECTED_MERGES}) "
                     f"and holds no {copies.RUN_BEFORE} (run-mark --before failed, so its command never ran; or the "
-                    "job is of 0.2.0, which recorded no runs): every version in the copy may be one the seed held")
+                    "job is of 0.2.0, which recorded no runs): every version in the copy may be one the seed held. "
+                    f"If it is a seed merge's job (job_merge_from_seed.do), its {copies.SEED_MERGE} is missing (the "
+                    "job could not write it), so nothing from it can merge: resubmit job_merge_from_seed.do")
         return None
     # Records of 0.3.0 carry only `new`, which was then the whole test.
     if not run.get("accepted", run["new"]):
@@ -517,7 +570,7 @@ def _merge_version(job_dir: Path, model: str, scenario: str, requested, allow_un
 def cmd_merge(args) -> int:
     import ixmp
 
-    from ixmp_copies.platforms import default_version, merge_scenario, platform_db
+    from ixmp_copies.platforms import merge_scenario, platform_db, source_version
 
     cfg = config_mod.load()
     model, into = _model(cfg, args), args.into or cfg.platform
@@ -547,35 +600,54 @@ def cmd_merge(args) -> int:
     def markers(v: int) -> tuple[str, str]:
         return copies.merge_marker(source, model, args.scenario, v), copies.legacy_marker(old_source, v)
 
-    if version != "default":
-        marker, legacy = markers(version)
+    def refuse_earlier(v: int) -> None:
+        marker, legacy = markers(v)
         earlier = copies.find_merge_record(cfg, dst, marker, model, args.scenario, legacy=legacy)
         if earlier:
-            raise Refused(f"{model}/{args.scenario} v{version} from {source} was merged into {into} before: "
+            raise Refused(f"{model}/{args.scenario} v{v} from {source} was merged into {into} before: "
                           f"{earlier}{changed}")
+
+    if version != "default":
+        refuse_earlier(version)
     print(f"{model}/{args.scenario} v{version} from {job_dir} -> {into} ({dst}); "
           f"pre-merge backup to {backups / label}/; record merge_{label}_*")
     if not args.apply:
         print("dry run: nothing copied or opened; pass --apply")
         return 0
-    backup_dir, _ = copies.backup(dst, backups, label)
     stamp = time.strftime("%Y%m%d_%H%M%S")
     # The job's own copy is never opened: a merge reads a throwaway checked copy of it.
     src_dir = job_dir / f"merge_src_{stamp}"
     copies.checked_copy(job_dir / "db" / STEM, src_dir, {"kind": "merge-source", "job": str(job_dir)})
     src_mp = ixmp.Platform(backend="jdbc", driver="hsqldb", url=copies.hsqldb_url(src_dir / STEM))
     try:
-        if version == "default":
-            version = _default(default_version, src_mp, model, args.scenario)
+        # The version is found in the job copy before the target is backed up: a version the copy
+        # lacks is a refusal with nothing changed.
+        requested = version
+        try:
+            version = source_version(src_mp, model, args.scenario, requested)
+        except LookupError as err:
+            raise Refused(f"{job_dir}'s copy: {err}" + ("; pass --version N" if requested == "default" else "")
+                          ) from err
+        if requested == "default":
+            refuse_earlier(version)
+        backup_dir, _ = copies.backup(dst, backups, label)
         marker, legacy = markers(version)
+        if seed_file.exists():
+            resubmit = ("resubmit job_merge_from_seed.do with SCENARIOS naming only the scenarios that have no "
+                        "complete copy in the main (one merged with its marker is refused; one without it would "
+                        "land again beside it)")
+        else:
+            resubmit = "a resubmission (submit_merges.sh with FORCE_RUNS=<run>) adds another version beside it"
         remedy = (f"Check {into} before anything else merges into it: a version of {model}/{args.scenario} "
                   f"whose scenario meta {cfg.marker_key!r} is {marker!r} is this merge, landed without its "
                   "record (a resubmission is refused by the marker). A version newer than every version of the "
                   "pre-merge backup without that meta is what the clone left: half-made, or complete if only "
-                  "the marker could not be set. Inspect it before merging again: a resubmission (submit_merges.sh "
-                  f"with FORCE_RUNS=<run>) adds another version beside it. {NO_SWAP}. The pre-merge backup, a "
-                  f"copy to read: {backup_dir}")
-        dst_mp = ixmp.Platform(into)
+                  f"the marker could not be set. Inspect it before merging again: {resubmit}. {NO_SWAP}. The "
+                  f"pre-merge backup, a copy to read: {backup_dir}")
+        dst_mp = _open_target(into, dst, (
+            f"Nothing may merge into {into} until it is shut down cleanly: find what holds it, and take a stale "
+            f"lock to the user, never delete it. Then merging again is safe: nothing of this merge is there. "
+            f"{NO_SWAP}. The pre-merge backup, a copy to read: {backup_dir}"))
         try:
             out = _guarded("MERGE", f"{into} ({dst})", remedy, lambda: merge_scenario(
                 src_mp, dst_mp, model, args.scenario, version, marker, cfg.marker_key, legacy))
@@ -596,8 +668,10 @@ def cmd_merge(args) -> int:
     try:
         copies.require_closed(dst)
     except Refused as err:
+        failed = ("" if out["compare"]["ok"] else
+                  f" Its comparison with the job's version also failed: {out['compare']['failures']}.")
         raise OperationFailed(f"merged and recorded ({record}): the version landed, and a resubmission is "
-                              f"refused by its record and marker; but {err}. Nothing may merge into {into} until "
+                              f"refused by its record and marker; but {err}.{failed} Nothing may merge into {into} until "
                               "it is shut down cleanly: find what holds it, and take a stale lock to the user, "
                               f"never delete it. {NO_SWAP}. The pre-merge backup, a copy to read: {backup_dir}") from err
     return 0 if out["compare"]["ok"] else 2
@@ -612,8 +686,8 @@ def _fresh_target(db: Path) -> bool:
     folder = db.parent
     if not folder.is_dir():
         raise Refused(f"{folder} does not exist{' as a folder' if folder.exists() else ''}: a mistyped url, or a "
-                      "disk not mounted? Run ixmp-copies platform-add (which creates it), or create it where the "
-                      "database belongs")
+                      "disk not mounted? If the platform's url is where the database belongs, create the folder "
+                      "(mkdir -p) and transfer again; platform-add refuses a platform already registered")
     if any(folder.glob(f"{db.name}.*")):
         return False
     if any(folder.iterdir()):
@@ -657,7 +731,17 @@ def cmd_transfer(args) -> int:
         version = args.version if isinstance(args.version, int) else _default(
             default_version, src_mp, model, args.scenario)
         src = message_ix.Scenario(src_mp, model, args.scenario, version=version)
-        dst_mp = ixmp.Platform(args.to)
+        if dst_db is None:  # not HyperSQL: an open that fails leaves nothing behind
+            dst_mp = ixmp.Platform(args.to)
+        elif backup_dir:
+            dst_mp = _open_target(args.to, dst_db, (
+                f"Check it is shut down cleanly before using it, and take a stale lock to the user, never delete it. "
+                f"The backup taken before it: {backup_dir}; restore it to a new folder if the target is damaged, "
+                "never over the target's own files"))
+        else:
+            dst_mp = _open_target(args.to, dst_db, (
+                f"It was a new database: look at what the failed open left in {dst_db.parent} before transferring "
+                "again (a transfer refuses a folder that holds files)"))
         try:
             def move():
                 added = seed_registry(dst_mp, read_registry(src_mp))
@@ -716,7 +800,8 @@ def parser() -> argparse.ArgumentParser:
     v.add_argument("folder")
     add("stage", cmd_stage, "--area", extra={"action": "append", "default": [],
                                              "help": "PATH, or CHECKOUT:PATH for an untracked file"})
-    add("collect", cmd_collect, "--area")
+    add("collect", cmd_collect, "--area",
+        gdx={"help": "also archive each closed job copy's GDX files and listings into this existing folder"})
     add("cleanup", cmd_cleanup, "--area", main={"help": "the results main the jobs merged into"}, apply=apply,
         include_outputs={"action": "store_true", "help": "also delete jobs holding files a run wrote"},
         discard={"help": "one job copy (its folder name) to delete whatever its merges"},
@@ -733,7 +818,8 @@ def parser() -> argparse.ArgumentParser:
     add("merge", cmd_merge, "--job-dir", "--scenario", version={"type": _version}, model={}, into={}, apply=apply,
         allow_unsolved={"action": "store_true"},
         despite_failed_run={"action": "store_true",
-                            "help": "merge --version N from a job whose run did not complete (checked by hand)"})
+                            "help": "merge --version N (checked by hand) from a job whose run did not complete, "
+                                    "never started or was refused"})
     t = add("transfer", cmd_transfer, "--to", "--scenario", version={"type": int}, model={}, apply=apply)
     t.add_argument("--from", dest="source", required=True, help="source platform name")
     return p

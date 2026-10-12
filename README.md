@@ -13,14 +13,14 @@ Claude Code:
 
 ```
 /plugin marketplace add Tyler-lc/tyler_lc-work-plugins
-/plugin install ixmp-copies@tyler_lc-work-plugins
+/plugin install ixmp-copies@tyler-lc-work-plugins
 ```
 
 To get a newer version later:
 
 ```
-/plugin marketplace update tyler_lc-work-plugins
-/plugin update ixmp-copies@tyler_lc-work-plugins
+/plugin marketplace update tyler-lc-work-plugins
+/plugin update ixmp-copies@tyler-lc-work-plugins
 ```
 
 then restart Claude Code (or `/reload-plugins`).

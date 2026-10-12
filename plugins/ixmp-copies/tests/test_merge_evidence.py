@@ -210,6 +210,7 @@ def test_a_run_that_never_started_is_not_merged(setup):
         out = merge(*extra)
         assert out.returncode == 3 and "never started" in out.stderr, (extra, out.stdout + out.stderr)
         assert "--version default" not in out.stderr.split("REFUSED:", 1)[1], out.stderr
+        assert f"seed merge's job (job_merge_from_seed.do), its {dbc.SEED_MERGE} is missing" in out.stderr
     assert not (area / "backups").exists() and not list(job.glob("merge_src_*"))
     other = merge(scenario="other")  # any scenario of that copy
     assert other.returncode == 3 and "never started" in other.stderr, other.stderr
@@ -276,8 +277,16 @@ def test_a_record_of_an_earlier_release_is_judged_again(setup):
 
 
 class _FakePlatform:
+    """Every platform holds m/sc v1 and v2, v2 default."""
+
     def __init__(self, *args, **kwargs):
         pass
+
+    def scenario_list(self, model, default):
+        import pandas as pd
+
+        rows = [{"model": model, "scenario": "sc", "version": v} for v in ((2,) if default else (1, 2))]
+        return pd.DataFrame(rows)
 
     def close_db(self):
         pass
@@ -375,3 +384,136 @@ def test_a_failed_transfer_names_its_backup(setup, monkeypatch, capsys, tmp_path
     assert cli.main(argv) == 4
     err = capsys.readouterr().err
     assert err.rstrip().endswith("may hold a partial version") and "backup" not in err, err
+
+
+def _in_process(setup, monkeypatch):
+    """cli.main against the setup's main with the platforms faked (no JVM); returns the main's db."""
+    import ixmp
+
+    from ixmp_copies import config as config_mod
+    from ixmp_copies import platforms
+
+    cfg, _, _, _, main, _, _ = setup
+    main_db = main / "db" / dbc.STEM
+    monkeypatch.chdir(cfg.project_root)
+    monkeypatch.delenv(config_mod.ENV, raising=False)
+    monkeypatch.setattr(platforms, "platform_db", lambda name: main_db)
+    monkeypatch.setattr(ixmp, "Platform", _FakePlatform)
+    return main_db
+
+
+def test_a_version_the_job_copy_lacks_is_refused_before_the_backup(setup, monkeypatch, capsys):
+    """--version N the job copy does not hold, or --version default with no default, is a refusal
+    (exit 3) found before the pre-merge backup; it used to fail inside the clone, after it (exit 4)."""
+    from ixmp_copies import cli, platforms
+
+    cfg, area, _, job, _, _, _ = setup
+    _in_process(setup, monkeypatch)
+
+    def no_such_version(*args):
+        raise RuntimeError("the clone met a version that is not there")
+
+    monkeypatch.setattr(platforms, "merge_scenario", no_such_version)
+    assert cli.main(["merge", "--job-dir", str(job), "--scenario", "sc", "--version", "5", "--apply"]) == 3
+    err = capsys.readouterr().err
+    assert "m/sc has no version 5 on this platform (versions: [1, 2])" in err, err
+    assert "pass --version" not in err, err
+    time.sleep(1.1)  # merge sources are named by the second
+    assert cli.main(["merge", "--job-dir", str(job), "--scenario", "other", "--version", "default", "--apply"]) == 3
+    err = capsys.readouterr().err
+    assert "m/other has no default version" in err and "pass --version N" in err, err
+    assert not (area / "backups").exists() and not list(cfg.records_dir.glob("merge_*.json"))
+
+
+def test_exit_4_of_a_seed_merge_and_of_a_target_that_does_not_open(setup, monkeypatch, capsys):
+    """A seed merge failing after its backup says to resubmit job_merge_from_seed.do for the scenarios
+    without a complete copy, not FORCE_RUNS. A target that does not open after the backup exits 4 (it
+    was Python's 1) and says nothing was copied. A merge recorded with its target left open and its
+    comparison failed says both."""
+    import ixmp
+
+    from ixmp_copies import cli, platforms
+
+    cfg, area, seed, job, _, _, _ = setup
+    main_db = _in_process(setup, monkeypatch)
+    argv = ["merge", "--job-dir", str(job), "--scenario", "sc", "--version", "2", "--apply"]
+
+    def oom(*args):
+        raise RuntimeError("java.lang.OutOfMemoryError: Java heap space")
+
+    monkeypatch.setattr(platforms, "merge_scenario", oom)
+    (job / dbc.SEED_MERGE).write_text(str(seed) + "\n")
+    assert cli.main(argv) == 4
+    err = capsys.readouterr().err
+    assert "resubmit job_merge_from_seed.do with SCENARIOS naming only the scenarios" in err, err
+    assert "FORCE_RUNS" not in err and "Never swap database files by hand" in err, err
+    (job / dbc.SEED_MERGE).unlink()
+
+    class NoTarget(_FakePlatform):
+        def __init__(self, *args, **kwargs):
+            if args:  # the target opens by name, the job's merge copy by url
+                raise RuntimeError("java.sql.SQLException: lockFile")
+
+    monkeypatch.setattr(ixmp, "Platform", NoTarget)
+    time.sleep(1.1)  # backups and merge sources are named by the second
+    def backups():
+        return [p for p in (area / "backups").glob("*/*") if p.is_dir()]
+
+    n_backups = len(backups())
+    assert cli.main(argv) == 4
+    err = capsys.readouterr().err
+    assert "FAILED: opening proj-local" in err and "failed: RuntimeError: java.sql.SQLException" in err, err
+    assert "nothing was copied into it" in err and "merging again is safe" in err, err
+    assert "Never swap database files by hand" in err and str(area / "backups") in err, err
+    assert not list(cfg.records_dir.glob("merge_*.json")) and len(backups()) == n_backups + 1
+
+    monkeypatch.setattr(ixmp, "Platform", _FakePlatform)
+
+    def lands_differs_and_holds(src_mp, dst_mp, model, scenario, version, marker, key, legacy):
+        Path(f"{main_db}.lck").write_text("held")
+        return {**_merged(model, scenario, version, marker), "compare": {"ok": False, "failures": ["OBJ 1.0 -> 2.0"]}}
+
+    monkeypatch.setattr(platforms, "merge_scenario", lands_differs_and_holds)
+    time.sleep(1.1)
+    assert cli.main(argv) == 4
+    err = capsys.readouterr().err
+    assert "merged and recorded" in err, err
+    assert "Its comparison with the job's version also failed: ['OBJ 1.0 -> 2.0']" in err, err
+    Path(f"{main_db}.lck").unlink()
+
+
+def test_a_transfer_target_that_does_not_open_exits_4(setup, monkeypatch, capsys, tmp_path):
+    """A HyperSQL target that does not open after its backup (or, new, before anything is in it)
+    exits 4 saying nothing was copied (it was Python's 1)."""
+    import ixmp
+    import message_ix
+
+    from ixmp_copies import cli, platforms
+    from ixmp_copies import config as config_mod
+
+    cfg, _, _, _, _, _, _ = setup
+    target = fake_db(tmp_path / "local")
+    monkeypatch.chdir(cfg.project_root)
+    monkeypatch.delenv(config_mod.ENV, raising=False)
+    monkeypatch.setattr(platforms, "is_hsqldb", lambda name: True)
+    monkeypatch.setattr(platforms, "platform_db", lambda name: target)
+    monkeypatch.setattr(message_ix, "Scenario", lambda *a, **k: object())
+
+    class NoTarget(_FakePlatform):
+        def __init__(self, *args, **kwargs):
+            if args and args[0] == "loc":
+                raise RuntimeError("java.sql.SQLException: lockFile")
+
+    monkeypatch.setattr(ixmp, "Platform", NoTarget)
+    argv = ["transfer", "--from", "ixmp-dev", "--to", "loc", "--scenario", "s", "--version", "1", "--apply"]
+    assert cli.main(argv) == 4
+    err = capsys.readouterr().err
+    backup = next((tmp_path / "hd" / cfg.backups / "loc").iterdir())
+    assert "FAILED: opening loc" in err and "nothing was copied into it" in err, err
+    assert f"The backup taken before it: {backup}" in err and "never over the target's own files" in err, err
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    monkeypatch.setattr(platforms, "platform_db", lambda name: fresh / "db")
+    assert cli.main(argv) == 4
+    err = capsys.readouterr().err
+    assert "It was a new database" in err and str(fresh) in err and "backup" not in err, err

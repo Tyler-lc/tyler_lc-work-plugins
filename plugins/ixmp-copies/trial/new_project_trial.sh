@@ -20,10 +20,10 @@
 #   - a scenario made on the workstation afterwards, merged from a newer seed, and that seed
 #     merge resubmitted, which must merge nothing twice;
 #   - two read jobs (no merge), one writing a file into its code copy;
-#   - collect, and cleanup in two passes: first only the job copies holding no run output (the
-#     read job without a file, the seed merge's copy), then with --include-outputs the merged
-#     solves (GDX files) and the read job's file; the two failed runs and the refused seed merge
-#     stay.
+#   - collect, and cleanup in three passes: first only the job copies holding no run output (the
+#     read job without a file, the seed merge's copy); then, after collect --gdx archived the GDX
+#     files and listings, the merged solves without --include-outputs; then with --include-outputs
+#     the read job's file; the two failed runs and the refused seed merge stay.
 # It writes on the H drive only below ixmp_copies/trial_<time>/. Exit 0 when every step and
 # check passed.
 set -euo pipefail
@@ -274,6 +274,19 @@ done
 for kept in "read_o_$run_o" "solve_i_$run_i" "solve_c_$run_c" "solve_f_$run_f" "solve_g_$run_g"; do
     case " $left " in *" $kept "*) ;; *) echo "cleanup deleted $kept, which holds run output" >&2; exit 1 ;; esac
 done
+say "collect --gdx, then cleanup takes the merged solves without --include-outputs"
+GDX_DIR="$LOCAL_ROOT/ixmp_copies/$NAME/gdx_archive"
+mkdir "$GDX_DIR"
+ixc collect --area test --gdx "$GDX_DIR"
+ixc verify "$GDX_DIR/solve_i_$run_i"
+ls "$GDX_DIR/solve_i_$run_i" | grep -q '^MsgOutput_.*\.gdx$' || { echo "no MsgOutput GDX archived for solve_i" >&2; exit 1; }
+ixc cleanup --area test --main results --apply
+left=$(ls "$LOCAL_AREA/jobs" | sort | paste -sd' ')
+echo "left: $left"
+for gone in "solve_i_$run_i" "solve_c_$run_c"; do
+    case " $left " in *" $gone "*) echo "cleanup kept $gone although its GDX is archived" >&2; exit 1 ;; esac
+done
+case " $left " in *" read_o_$run_o "*) ;; *) echo "cleanup deleted read_o, whose code-copy file is not archived" >&2; exit 1 ;; esac
 ixc cleanup --area test --main results --include-outputs --apply
 left=$(ls "$LOCAL_AREA/jobs" | sort | paste -sd' ')
 want="merge_seed_$resubmitted solve_f_$run_f solve_g_$run_g"

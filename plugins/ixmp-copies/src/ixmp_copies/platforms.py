@@ -186,6 +186,18 @@ def default_version(mp, model: str, scenario: str) -> int:
     return int(listed["version"].iloc[0])
 
 
+def source_version(mp, model: str, scenario: str, requested) -> int:
+    """The version `requested` (a number, or "default") names on `mp`; LookupError when `mp` has
+    no such version, so a merge can refuse before it backs up its target."""
+    if requested == "default":
+        return default_version(mp, model, scenario)
+    held = sorted(int(v) for v in versions(mp, model, scenario, default=False)["version"])
+    if requested not in held:
+        raise LookupError(f"{model}/{scenario} has no version {requested} on this platform "
+                          f"(versions: {held or 'none'})")
+    return requested
+
+
 def merge_scenario(src_mp, dst_mp, model: str, scenario: str, version: int,
                    marker: str, marker_key: str, legacy: str | None = None) -> dict:
     """Bring one version from a job's database copy (`src_mp`) into a main platform

@@ -68,6 +68,9 @@ MODEL_IGNORE = shutil.ignore_patterns("225*", "*.lst", "*.log", "*.gdx", "*.~*")
 # What a solve leaves in a job's model folder that may be the only copy of something: GDX files
 # (model/data, and model/output, which holds the equation duals), listings and GAMS scratch.
 MODEL_OUTPUTS = ("*.gdx", "*.lst", "225*")
+# Of those, what `collect --gdx` archives; GAMS scratch folders are not worth keeping.
+ARCHIVED_OUTPUTS = ("*.gdx", "*.lst")
+OUTPUTS_KIND = "model-outputs"
 
 
 class Refused(RuntimeError):
@@ -639,6 +642,97 @@ def job_outputs(cfg: Config, job: Path) -> list[str]:
     return out
 
 
+def outputs_record(cfg: Config, area: str, job: Path) -> Path:
+    return cfg.records_dir / f"gdx_{area}_{job.name}.json"
+
+
+def archivable_outputs(job: Path) -> dict[str, Path]:
+    """The GDX files and listings in the job copy's model folder (outside GAMS scratch), by file
+    name: an archive folder holds them side by side, so two of one name are refused."""
+    model, found = job / "model", {}
+    for p in sorted(model.rglob("*")) if model.is_dir() else []:
+        rel = p.relative_to(model)
+        if (p.is_file() and any(fnmatch.fnmatch(p.name, pat) for pat in ARCHIVED_OUTPUTS)
+                and not any(fnmatch.fnmatch(part, "225*") for part in rel.parts)):
+            if p.name in found:
+                raise Refused(f"{job}: two model outputs named {p.name} ({found[p.name]}, {p}) cannot be archived "
+                              "side by side")
+            found[p.name] = p
+    return found
+
+
+def archive_outputs(cfg: Config, area: str, job: Path, dest_root: Path) -> str:
+    """Copy the GDX files and listings of the closed job copy `job` (archivable_outputs) into
+    dest_root/<job name>/, with a manifest that `verify` re-reads, and record it in the records
+    folder (outputs_record), which is how cleanup finds the archive. Built in a '.partial'
+    sibling and renamed only when the files, read before and after, and the copy hash the same.
+    Returns 'copied', 'present' (archived before, the files of the same names and sizes) or
+    'none' (nothing to archive). An archive or a record that does not match is never
+    overwritten: Refused."""
+    files = archivable_outputs(job)
+    if not files:
+        return "none"
+    dest = dest_root / job.name
+    model = job / "model"
+    if dest.exists():
+        manifest_path = dest / MANIFEST
+        manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+        held = {n: f["size"] for n, f in manifest.get("files", {}).items()}
+        if manifest.get("kind") != OUTPUTS_KIND or held != {n: p.stat().st_size for n, p in files.items()}:
+            raise Refused(f"{dest} exists and does not hold {job.name}'s model outputs as they are now (never "
+                          "overwritten)")
+        status = "present"
+    else:
+        staging = dest.with_name(dest.name + PARTIAL)
+        if staging.exists():
+            raise Refused(f"{staging} exists: an earlier archive of {job.name} did not finish; look at it, delete it, "
+                          "and collect again")
+        before = snapshot(list(files.values()))
+        staging.mkdir(parents=True)
+        for name, src in files.items():
+            _copy_file(src, staging / name)
+        copied = snapshot([staging / name for name in files])
+        after = snapshot(list(files.values()))
+        if not before == after == copied:
+            raise CopyMismatch(f"{model}: outputs before {before}, after {after}, copy {copied}; partial copy left "
+                               f"at {staging}")
+        manifest = {"kind": OUTPUTS_KIND, "job": str(job), "source": str(model),
+                    "paths": {name: str(src.relative_to(model)) for name, src in files.items()}, "files": copied,
+                    "host": socket.gethostname(), "user": getpass.getuser(),
+                    "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool": f"ixmp-copies {__version__}"}
+        write_new(staging / MANIFEST, json.dumps(manifest, indent=2))
+        staging.rename(dest)
+        status = "copied"
+    record_path, record = outputs_record(cfg, area, job), {**manifest, "archive": str(dest)}
+    if record_path.exists():
+        if json.loads(record_path.read_text()) != record:
+            raise Refused(f"{record_path} exists and describes another archive of {job.name} (never overwritten)")
+    else:
+        cfg.records_dir.mkdir(parents=True, exist_ok=True)
+        write_new(record_path, json.dumps(record, indent=2))
+    return status
+
+
+def archived_outputs(cfg: Config, job: Path) -> set[str]:
+    """The model outputs of `job` (named as job_outputs names them) that an archive record shows
+    archived: the archive re-read against its manifest (every file hashed, since cleanup deletes
+    the other copy), its manifest the record's, and the job's file still of the archived size.
+    Anything that does not hold counts as not archived."""
+    found: set[str] = set()
+    for path in sorted(cfg.records_dir.glob(f"gdx_*_{job.name}.json")) if cfg.records_dir.is_dir() else []:
+        record = json.loads(path.read_text())
+        if record.get("kind") != OUTPUTS_KIND or Path(record.get("job", "")).resolve() != job.resolve():
+            continue
+        archive = Path(record["archive"])
+        if verify(archive) or json.loads((archive / MANIFEST).read_text())["files"] != record["files"]:
+            continue
+        for name, rel in record["paths"].items():
+            src = job / "model" / rel
+            if src.is_file() and src.stat().st_size == record["files"][name]["size"]:
+                found.add(f"model/{rel}")
+    return found
+
+
 def _listed(names: list[str], most: int = 5) -> str:
     return str(names) if len(names) <= most else f"{names[:most]} and {len(names) - most} more"
 
@@ -659,9 +753,12 @@ def _deletable(cfg: Config, job: Path, include_outputs: bool) -> str | None:
         except Refused as err:
             return f"a merge from it is running or did not finish ({src.name} not closed): {err}"
     outputs = job_outputs(cfg, job)
+    if outputs and not include_outputs and any(o.startswith("model/") for o in outputs):
+        archived = archived_outputs(cfg, job)
+        outputs = [o for o in outputs if o not in archived]
     if outputs and not include_outputs:
-        return (f"holds files a run wrote: {_listed(outputs)} (copy out what is needed, GDX in model/output "
-                "included, then pass --include-outputs)")
+        return (f"holds files a run wrote: {_listed(outputs)} (copy out what is needed, then pass "
+                "--include-outputs; collect --gdx archives GDX files and listings, which cleanup then accepts)")
     uncollected = uncollected_records(cfg, job)
     if uncollected:
         return f"records not collected yet: {uncollected} (ixmp-copies collect)"

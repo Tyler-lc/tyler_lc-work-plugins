@@ -430,3 +430,107 @@ def test_submit_merges_resubmits_a_merge_that_exited_4_only_when_told(project, t
     (fake / "states").write_text((fake / "states").read_text() + "101 COMPLETED\n")
     after = submit(FORCE_RUNS="a_1")  # the forced merge is now the latest: completed, skipped
     assert "skip a_1: merge 101 is COMPLETED" in after.stdout and len((fake / "sbatch.log").read_text().splitlines()) == 1
+
+
+def _solved(job: Path) -> None:
+    """What a MESSAGE-MACRO solve leaves in a job copy's model folder."""
+    (job / "model" / "data").mkdir(parents=True, exist_ok=True)
+    (job / "model" / "output").mkdir(parents=True, exist_ok=True)
+    (job / "model" / "data" / "MsgData_m_sc.gdx").write_bytes(b"input data " * 1000)
+    (job / "model" / "output" / "MsgOutput_m_sc.gdx").write_bytes(b"duals " * 1000)
+    (job / "model" / "MESSAGE-MACRO_run.lst").write_text("listing")
+
+
+def test_collect_gdx_archives_model_outputs_and_cleanup_accepts_them(project, tmp_path):
+    """collect --gdx copies each closed job's GDX files and listings into DIR/<job>/ with a manifest
+    verify reads and a record; cleanup then deletes the job without --include-outputs. Repeating is a
+    no-op; a job not closed is left alone."""
+    cfg, hd = project
+    _, job = _area(cfg, hd, tmp_path)
+    solved = job("solved_1")
+    _solved(solved)
+    _record(cfg, solved, "s")
+    running = job("running_2", close=False)
+    _solved(running)
+    dest = tmp_path / "gdx_archive"
+    dest.mkdir()
+    kept = {j.name: why for j, why in dbc.cleanup_plan(cfg, "test", "results")["keep"]}
+    assert "MsgOutput_m_sc.gdx" in kept["solved_1"], kept
+    out = run_cli(["collect", "--area", "test", "--gdx", str(dest)], cfg.project_root)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "1 jobs archived" in out.stdout and "not archived (its job has not closed it): running_2" in out.stdout
+    archive = dest / "solved_1"
+    assert sorted(p.name for p in archive.iterdir()) == [
+        "MESSAGE-MACRO_run.lst", "MsgData_m_sc.gdx", "MsgOutput_m_sc.gdx", dbc.MANIFEST]
+    assert dbc.verify(archive) == [] and not (dest / "running_2").exists()
+    record = json.loads(dbc.outputs_record(cfg, "test", solved).read_text())
+    assert record["archive"] == str(archive) and record["paths"]["MsgOutput_m_sc.gdx"] == "output/MsgOutput_m_sc.gdx"
+    plan = dbc.cleanup_plan(cfg, "test", "results")
+    assert [j.name for j, _ in plan["delete"]] == ["solved_1"], plan["keep"]
+    again = run_cli(["collect", "--area", "test", "--gdx", str(dest)], cfg.project_root)
+    assert again.returncode == 0 and "0 jobs archived, 1 already archived" in again.stdout, again.stdout + again.stderr
+
+
+def test_cleanup_keeps_what_the_archive_does_not_prove(project, tmp_path):
+    """The archive is re-read before cleanup counts a file as copied out: a byte changed in the archive,
+    a job file of another size since, a GAMS scratch folder (never archived), or a record of another job
+    whose name ends the same, all keep the job."""
+    cfg, hd = project
+    _, job = _area(cfg, hd, tmp_path)
+    dest = tmp_path / "gdx_archive"
+    dest.mkdir()
+    tampered, grown, scratch = job("tampered_1"), job("grown_2"), job("scratch_3")
+    for j in (tampered, grown, scratch):
+        _solved(j)
+        _record(cfg, j, "s")
+    (scratch / "model" / "225a").mkdir()
+    (scratch / "model" / "225a" / "gamscntr.dat").write_text("x")
+    for j in (tampered, grown, scratch):
+        assert dbc.archive_outputs(cfg, "test", j, dest) == "copied"
+    gdx = dest / "tampered_1" / "MsgOutput_m_sc.gdx"
+    gdx.write_bytes(gdx.read_bytes()[:-1] + b"X")  # same size, other content
+    (grown / "model" / "MESSAGE-MACRO_run.lst").write_text("listing, longer now")
+    kept = {j.name: why for j, why in dbc.cleanup_plan(cfg, "test", "results")["keep"]}
+    assert "MsgOutput_m_sc.gdx" in kept["tampered_1"], kept
+    assert "MESSAGE-MACRO_run.lst" in kept["grown_2"] and "MsgOutput" not in kept["grown_2"], kept
+    assert "225a" in kept["scratch_3"] and ".gdx" not in kept["scratch_3"], kept
+    assert len(dbc.archived_outputs(cfg, scratch)) == 3
+    lookalike = job("x_scratch_3")  # its record gdx_test_x_scratch_3.json matches scratch_3's gdx_*_scratch_3.json
+    _solved(lookalike)
+    assert dbc.archive_outputs(cfg, "test", lookalike, dest) == "copied"
+    dbc.outputs_record(cfg, "test", scratch).unlink()
+    assert dbc.archived_outputs(cfg, scratch) == set()
+
+
+def test_collect_gdx_refuses_what_it_must_not_write(project, tmp_path):
+    """No folder, or one inside the jobs folder (cleanup would delete it): refused before anything. An
+    archive that no longer matches the job, a record of another archive, or a partial archive left by an
+    earlier collect: not overwritten, exit 2, the other jobs still archived."""
+    cfg, hd = project
+    area, job = _area(cfg, hd, tmp_path)
+    a, b, c = job("a_1"), job("b_2"), job("c_3")
+    for j in (a, b, c):
+        _solved(j)
+
+    def collect(dest):
+        return run_cli(["collect", "--area", "test", "--gdx", str(dest)], cfg.project_root)
+
+    missing = collect(tmp_path / "nowhere")
+    assert missing.returncode == 3 and "not an existing folder" in missing.stderr, missing.stderr
+    inside = collect(area / "jobs")
+    assert inside.returncode == 3 and "cleanup would delete the archive" in inside.stderr, inside.stderr
+    assert not cfg.records_dir.exists() or not list(cfg.records_dir.glob("gdx_*"))
+    dest = tmp_path / "gdx_archive"
+    dest.mkdir()
+    assert collect(dest).returncode == 0
+    (a / "model" / "MESSAGE-MACRO_run.lst").write_text("rewritten, longer")  # a's archive no longer matches
+    other = json.loads(dbc.outputs_record(cfg, "test", b).read_text())
+    dbc.outputs_record(cfg, "test", b).write_text(json.dumps({**other, "archive": "/elsewhere"}))
+    (dest / "c_3").rename(dest / f"c_3{dbc.PARTIAL}")  # as an archive interrupted before its rename leaves it
+    d = job("d_4")
+    _solved(d)
+    out = collect(dest)
+    assert out.returncode == 2, out.stdout + out.stderr
+    assert "a_1's model outputs as they are now" in out.stderr and "describes another archive of b_2" in out.stderr
+    assert "an earlier archive of c_3 did not finish" in out.stderr, out.stderr
+    assert "1 jobs archived, 0 already archived" in out.stdout and dbc.verify(dest / "d_4") == []

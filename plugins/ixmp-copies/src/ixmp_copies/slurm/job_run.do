@@ -14,7 +14,8 @@
 # With MERGE_SCENARIO (submit_runs.sh sets it), the job records that scenario's versions before
 # CMD and the version CMD left as default after it (run-mark); the job fails, and its merge does
 # not run, unless CMD left a new version as default or solved the default version in place.
-# If run-mark --before fails, CMD does not run, and the merge refuses the job (it never started).
+# If run-mark --before fails, CMD does not run (`Exit: run -`), and the merge refuses the job (it
+# never started).
 # CMD must call set_as_default() on its result. MERGE_SCENARIO "-" declares a run that merges
 # nothing (a read job): cleanup may then delete its copy without a merge record.
 # code_files.json records the code copy as made, so cleanup can tell what CMD wrote into it.
@@ -50,12 +51,12 @@ if [ -n "${MERGE_SCENARIO:-}" ]; then
     step ixc run-mark --job-dir "$JOB_DIR" --scenario "$MERGE_SCENARIO" ${MODEL:+--model "$MODEL"} --before
     MARK=$?
 fi
-RUN=1
+RUN=-
 if [ $MARK -eq 0 ]; then
     step bash -c "$CMD"
     RUN=$?
 fi
-if [ $RUN -eq 0 ] && [ -n "${MERGE_SCENARIO:-}" ]; then
+if [ "$RUN" = 0 ] && [ -n "${MERGE_SCENARIO:-}" ]; then
     step ixc run-mark --job-dir "$JOB_DIR" --scenario "$MERGE_SCENARIO" ${MODEL:+--model "$MODEL"} --after
     MARK=$?
 fi
@@ -64,4 +65,4 @@ CLOSE=$?
 step ixc verify "$SEED"
 SEEDOK=$?
 echo "Exit: run $RUN mark $MARK close $CLOSE seed $SEEDOK  $(date -Is)"
-[ $RUN -eq 0 ] && [ $MARK -eq 0 ] && [ $CLOSE -eq 0 ] && [ $SEEDOK -eq 0 ]
+[ "$RUN" = 0 ] && [ $MARK -eq 0 ] && [ $CLOSE -eq 0 ] && [ $SEEDOK -eq 0 ]

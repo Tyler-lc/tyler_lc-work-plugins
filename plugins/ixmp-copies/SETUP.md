@@ -176,8 +176,9 @@ and runs the whole chain on the cluster:
 - a merge cancelled on purpose, recovered with `submit_merges.sh`
 - a scenario made on the workstation afterwards, merged from a newer seed
 - two read jobs (no merge), one of which writes a file into its code copy
-- `collect`, then `cleanup`: first the job copies that hold no run output, then, with
-  `--include-outputs`, those holding GDX files or the read job's file
+- `collect`, then `cleanup`: first the job copies that hold no run output; then, after `collect
+  --gdx` archived the GDX files, the merged solves; then, with `--include-outputs`, the read job's
+  file
 
 It needs pytest in the workstation venv (message_ix's test model imports it) and writes on the H
 drive only below `ixmp_copies/trial_<time>/`:

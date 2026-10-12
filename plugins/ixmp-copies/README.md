@@ -27,7 +27,7 @@ In Claude Code it is loaded by the plugin:
 
 ```
 /plugin marketplace add Tyler-lc/tyler_lc-work-plugins
-/plugin install ixmp-copies@tyler_lc-work-plugins
+/plugin install ixmp-copies@tyler-lc-work-plugins
 ```
 
 Setting up a project, in order. Steps 1-3 need the user, because they involve their accounts and
@@ -71,7 +71,7 @@ From this folder, with the Python of a venv that has ixmp and message_ix:
 PYTHONPATH=src uv run --no-project --python <venv>/bin/python --with pytest python -m pytest
 ```
 
-Without ixmp and message_ix, 20 of the 98 tests skip (everything that resolves a platform or
+Without ixmp and message_ix, 30 of the 111 tests skip (everything that resolves a platform or
 runs a job script). The integration tests build real HyperSQL databases in a temp folder and need
 java; the one that solves in place also needs `gams` on `PATH`. Each is skipped without what it
 needs.

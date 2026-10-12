@@ -282,7 +282,7 @@ def test_a_run_whose_run_mark_before_fails_is_never_merged(project, tmp_path):
            "CMD": 'touch "$IXC_JOB_DIR/cmd_ran"'}
     out = subprocess.run(["bash", str(code / ".ixmp_copies/slurm/job_run.do")], capture_output=True,
                          text=True, env=env, cwd=tmp_path)
-    assert out.returncode != 0 and "Exit: run 1 mark 1 close 0 seed 0" in out.stdout, out.stdout[-2000:] + out.stderr
+    assert out.returncode != 0 and "Exit: run - mark 1 close 0 seed 0" in out.stdout, out.stdout[-2000:] + out.stderr
     job_dir = hd / "ixmp_test" / "jobs" / "nostart_45"
     assert not (job_dir / "cmd_ran").exists() and (job_dir / "result.json").is_file()
     assert (job_dir / dbc.EXPECTED_MERGES).read_text() == "sc\n" and not (job_dir / dbc.RUN_BEFORE).exists()
@@ -345,11 +345,12 @@ def test_transfer_target_folder(project, tmp_path):
                        IXMP_DATA=str(home))
 
     unmounted = transfer_to(tmp_path / "not" / "mounted" / "db")
-    assert unmounted.returncode == 3 and "platform-add" in unmounted.stderr, unmounted.stdout + unmounted.stderr
+    assert unmounted.returncode == 3 and "create the folder" in unmounted.stderr, unmounted.stdout + unmounted.stderr
+    assert "platform-add refuses a platform already registered" in unmounted.stderr, unmounted.stderr
     assert "a new database" not in unmounted.stdout
     below = transfer_to(tmp_path / "newdb" / "db")  # missing, below an existing folder: refused too
     assert below.returncode == 3 and "newdb does not exist" in below.stderr, below.stdout + below.stderr
-    assert "platform-add" in below.stderr and not (tmp_path / "newdb").exists()
+    assert "create the folder" in below.stderr and not (tmp_path / "newdb").exists()
     (tmp_path / "newdb").mkdir()  # as platform-add leaves it
     empty = transfer_to(tmp_path / "newdb" / "db")
     assert empty.returncode == 0 and "a new database, nothing to back up" in empty.stdout, empty.stdout + empty.stderr

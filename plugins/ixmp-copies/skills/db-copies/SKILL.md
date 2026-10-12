@@ -90,9 +90,12 @@ wherever it is mounted on the workstation.
    (whatever its extension) is refused as already submitted into that main. Every merge into a
    main runs alone (`--dependency=singleton`).
 6. Check each job's `Exit:` line (`grep -H Exit: <area>/runs/*.out`: run, mark, close and seed
-   all 0) and its merge record.
+   all 0; `run -` means the command never ran because `run-mark --before` failed) and its merge
+   record.
 7. Workstation: `ixmp-copies collect --area live` brings the records home (json records are
-   write-once; submission records, which only grow, are updated).
+   write-once; submission records, which only grow, are updated). With `--gdx DIR` (an existing
+   folder outside the area's `jobs/`) it also archives each closed job copy's GDX files and
+   listings: see "Cleaning up".
 
 A chain (solve A, seed from A's closed copy, solve B..N from that seed) is `submit.sh job_seed.do
 AREA=live NAME=<seed> SRC_JOB=<A's job dir> -- --dependency=afterok:<A>`, then `submit_runs.sh` with
@@ -121,6 +124,11 @@ AREA=live NAME=<seed> SRC_JOB=<A's job dir> -- --dependency=afterok:<A>`, then `
     copy is there, resubmit with `FORCE_RUNS="NAME ..." CODE=... bash .../submit_merges.sh
     <record>` (the runs' names), which adds another version beside it. Note the number of a
     half-made version: it stays.
+  - A seed merge (`job_merge_from_seed.do`) is checked the same way, but recovered by resubmitting
+    `job_merge_from_seed.do` with `SCENARIOS` naming only the scenarios that have no complete copy
+    in the main: one merged with its marker is refused, one without it would land again beside it.
+  - `opening <main> (...) failed`: nothing was copied into the main, but the failed open may have
+    left it not shut down cleanly. Once it is closed, merging again is safe.
 
   The tool does not restore a main in place, and its database files are never swapped by hand:
   records of merges made since would outlive the swap. The backup the merge's log names is a copy
@@ -143,7 +151,11 @@ AREA=live NAME=<seed> SRC_JOB=<A's job dir> -- --dependency=afterok:<A>`, then `
   it; a record an earlier release accepted is judged by this release's rule too) is refused
   whatever the version. After checking a version by hand, `--version N --despite-failed-run`
   merges it, and the merge record says so (`despite_failed_run`, and the run's record as it
-  was).
+  was). The flag also waives the solution check (an unsolved version merges without
+  `--allow-unsolved`) and, for a run that never started, any check that the scenario is the one
+  `expected_merges.txt` names: what you checked by hand is all that stands behind it.
+  A seed merge's job whose `seed_merge.txt` is missing (the job could not write it) is refused as
+  a run that never started; nothing from it merges: resubmit `job_merge_from_seed.do`.
 
 ## Getting results out
 
@@ -160,7 +172,8 @@ Everything is read from the results main, never job by job: each job copy only f
   home) or other files into the code copy or `$IXC_JOB_DIR`. `cleanup` keeps a job holding such
   files until you have copied them out and pass `--include-outputs`.
 - **Equation duals and other GDX output** of a solve stay in the job copy's `model/output/` (and
-  `model/data/`); the merge brings back the scenario, not the GDX. Copy them out before cleanup.
+  `model/data/`); the merge brings back the scenario, not the GDX. Archive them with `collect
+  --gdx DIR` before cleanup.
 
 ## Cleaning up
 
@@ -180,8 +193,17 @@ scenario and by `job_merge_from_seed.do`) has one, the job's own `.json` records
 - GDX files (`model/data`, and `model/output`, which holds the equation duals), listings and
   GAMS scratch (`225*`) in the job's model copy. Every job that solved has these.
 
-So copy out what is needed, then `cleanup ... --include-outputs --apply` deletes merged job
-copies whatever they hold. Kept: open or failed jobs, jobs holding a merge's copy of their
+`collect --area A --gdx DIR` archives the GDX files and listings (not GAMS scratch) of every
+job copy its job closed into `DIR/<job>/`, built in a `.partial` folder and renamed only when the
+files, read before and after, and the copy hash the same, with a manifest that `ixmp-copies verify
+DIR/<job>` re-reads (from the cluster, as for any copy) and a record `gdx_<area>_<job>.json` in
+the records folder. An archive is never overwritten: one that no longer matches the job's files,
+a record describing another archive, or a `.partial` folder left by an interrupted collect is
+reported (exit 2) and the other jobs are still archived. `cleanup` then counts an archived file
+as copied out once it has re-read the whole archive against its manifest (every file hashed: the
+job's copy is about to go) and found the job's file still of the archived size; anything else in
+the model copy (scratch) still keeps the job. So archive the GDX, copy out anything else that is
+needed, and `cleanup ... --include-outputs --apply` deletes merged job copies whatever they hold. Kept: open or failed jobs, jobs holding a merge's copy of their
 database (`merge_src_*`) that is not closed (a merge running, on any host, or one that died),
 jobs without a record (a job submitted by hand without `MERGE_SCENARIO` included), jobs whose
 merge failed or went elsewhere. New files and files of another size in a code copy count as
@@ -201,7 +223,8 @@ seeds and pre-merge backups stay until the user decides to delete them.
 0 done; 3 refused, nothing changed (including: no H drive reachable, an unknown platform, no
 project or ixmp config, a command line the tool does not accept); 2 a copy does not match its source, `verify` found a difference, a
 merge/transfer comparison failed, or `collect` met a record it will not overwrite; 4 a merge or
-transfer failed after its backup, or left its target not shut down cleanly (the message says what
+transfer failed after its backup (for a merge, also: its target could not be opened after the
+backup), or left its target not shut down cleanly (the message says what
 to check and names the backup taken before it; for a results main, see "A merge exited 4"
 above); 1 a failed `doctor` check, or Python's own code for an uncaught
 error, which is a bug or an unforeseen failure, never a refusal. In job scripts the `Exit:` line
@@ -217,12 +240,13 @@ lists each step's code.
 | `job-check` | ixmp in this process does not resolve the platform to the job's copy, the model dir to the job's `model/`, or knows any other platform |
 | `job-close` | the copy is not closed; `result.json` exists |
 | `run-mark --after` | the default version is neither new nor the default solved in place (unsolved before, solved after, no other version made): no default, an older version made default, still unsolved, solved before and after, or solved in place beside a new version left non-default |
-| `merge` | the job copy changed since `job-close`; the run did not complete (`run_before.json` without `run_result.json`), never started (`expected_merges.txt` names a scenario, no `run_before.json`, not a seed merge) or was refused (by `run-mark`, or by this release's rule for a record an earlier release accepted), unless `--version N --despite-failed-run`; `--despite-failed-run` on any other job; the run's record shows an unsolved version (without `--allow-unsolved`), another model or scenario, or another version than `--version`; no run record and no `--version`; a passing merge record of the same model and scenario with the same marker exists (checked before the backup); the target is not closed; the same merge was made before (scenario meta `[merge] marker_key`: `merged from <source> <model>/<scenario> v<N>`, the source being the job copy, or for a seed merge the database the seed's versions came from); no model |
-| `cleanup` | (keeps, with the reason) open jobs, a `merge_src_*` copy not closed, uncollected records, run outputs (job folder, code copy, GDX and listings in the model copy), missing or failed merges; no `--main` and no `--discard` |
+| `merge` | the job copy changed since `job-close`; the run did not complete (`run_before.json` without `run_result.json`), never started (`expected_merges.txt` names a scenario, no `run_before.json`, not a seed merge) or was refused (by `run-mark`, or by this release's rule for a record an earlier release accepted), unless `--version N --despite-failed-run`; `--despite-failed-run` on any other job; a `--version N` the job copy does not hold, or no default version for `--version default` (both checked before the backup); the run's record shows an unsolved version (without `--allow-unsolved`), another model or scenario, or another version than `--version`; no run record and no `--version`; a passing merge record of the same model and scenario with the same marker exists (checked before the backup); the target is not closed; the same merge was made before (scenario meta `[merge] marker_key`: `merged from <source> <model>/<scenario> v<N>`, the source being the job copy, or for a seed merge the database the seed's versions came from); no model |
+| `collect --gdx DIR` | `DIR` is not an existing folder, or lies inside the area's `jobs/`; per job (reported, exit 2, the rest archived): an archive of that job that does not match its files now, a record describing another archive, a `.partial` archive left before, two outputs of one file name, a copy that does not match its source |
+| `cleanup` | (keeps, with the reason) open jobs, a `merge_src_*` copy not closed, uncollected records, run outputs (job folder, code copy, GDX and listings in the model copy not proven archived by `collect --gdx`, GAMS scratch), missing or failed merges; no `--main` and no `--discard` |
 | `cleanup --discard` | no `--reason`; with `--main`; no such job copy; not closed by its job, or its database or a `merge_src_*` copy not closed; uncollected records; run outputs (without `--include-outputs`) |
 | `job_seed.do` | both `BACKUP` and `SRC_JOB` set |
 | `restore` | the backup does not match its manifest; the destination exists or is on the H drive |
-| `transfer` | a HyperSQL target is not closed (a target whose database files do not exist yet, in an existing empty folder, is new: nothing to back up); a target folder that is missing (a mistyped url, a disk not mounted: run `platform-add`, which creates it, or create it) or holds other files; the scenario has no default version and no `--version` |
+| `transfer` | a HyperSQL target is not closed (a target whose database files do not exist yet, in an existing empty folder, is new: nothing to back up); a target folder that is missing (a mistyped url, a disk not mounted: if the url is right, create the folder; `platform-add` refuses a platform already registered) or holds other files; the scenario has no default version and no `--version` |
 
 ## Rules
 
