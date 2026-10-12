@@ -43,7 +43,9 @@ started now see `Exit: run -`.
 Verified: 111 tests pass with ixmp, message_ix, java and GAMS (30 skip without ixmp and
 message_ix); the nine new or changed tests fail against 0.4.2. Both job templates pass `bash -n`.
 Ruff reports no finding beyond the 64 already present in 0.4.2 except one unused `noqa`, which
-mirrors the existing one in `_guarded`. Not yet run: the cluster trial.
+mirrors the existing one in `_guarded`. The cluster trial passed on UniCC (2026-10-12, `TRIAL PASSED`),
+every section of it: `collect --gdx` archived the six solved jobs, and cleanup then deleted the four
+merged ones without `--include-outputs`.
 
 ## 0.4.2 (2026-10-10)
 
